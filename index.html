@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SPIM QC</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>SPIM QC</h1>
+      <span class="sub">Lightsheet image check and orientation. Files are read on this computer and never uploaded.</span>
+    </header>
+
+    <section id="drop" class="drop">
+      <p>Drop an Imaris <code>.ims</code> file here</p>
+      <label class="button">Choose file<input id="file-input" type="file" accept=".ims" hidden /></label>
+      <p id="status" class="status"></p>
+    </section>
+
+    <main id="app" hidden>
+      <aside>
+        <h2 id="file-name"></h2>
+        <dl id="file-info"></dl>
+
+        <h3>Channels</h3>
+        <div id="channels"></div>
+
+        <h3>Orientation</h3>
+        <p class="hint">
+          Turn the brain until it matches the labels: olfactory bulbs at <b>A</b>, cerebellum at <b>P</b>, the dorsal
+          surface of the cortex at <b>S</b>.
+        </p>
+        <label>Start from
+          <select id="preset"></select>
+        </label>
+        <div class="orientation">
+          <input id="orientation" maxlength="3" spellcheck="false" aria-label="Orientation string (X, Y, Z)" />
+          <span class="hint">letter each of X, Y, Z increases towards</span>
+        </div>
+        <div class="rotations">
+          <span>Turn about</span>
+          <span>L–R</span><button data-rot="R,1">↻</button><button data-rot="R,-1">↺</button>
+          <span>A–P</span><button data-rot="A,1">↻</button><button data-rot="A,-1">↺</button>
+          <span>S–I</span><button data-rot="S,1">↻</button><button data-rot="S,-1">↺</button>
+        </div>
+        <button id="mirror" class="secondary">Mirror left–right…</button>
+        <p id="handedness" class="warning" hidden></p>
+        <label class="check"><input id="confirmed" type="checkbox" /> I checked the orientation</label>
+
+        <h3>Rating</h3>
+        <div class="rating">
+          <label><input type="radio" name="rating" value="pass" /> pass</label>
+          <label><input type="radio" name="rating" value="check" /> check</label>
+          <label><input type="radio" name="rating" value="fail" /> fail</label>
+        </div>
+        <textarea id="note" rows="3" placeholder="Note"></textarea>
+        <button id="export">Save QC (JSON)</button>
+        <button id="close" class="secondary">Open another file</button>
+      </aside>
+
+      <section class="views">
+        <div class="view-controls">
+          <label><input type="radio" name="mode" value="mip" checked /> Projection</label>
+          <label><input type="radio" name="mode" value="slice" /> Slices</label>
+          <span id="read-status" class="hint"></span>
+        </div>
+        <div id="views"></div>
+      </section>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
