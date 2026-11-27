@@ -1,5 +1,7 @@
 # SPIM QC (prototype)
 
+**Use it:** https://www.khanlab.ca/mind-spim-qc/ · [Guide for microscopists](docs/user-guide.md)
+
 Browser tool for microscope operators: drop a lightsheet image, check it, set its
 orientation, and save a QC JSON. Files are read locally (h5wasm in a Web Worker,
 mounted with WORKERFS, so only the needed chunks are read) and never uploaded.
@@ -57,7 +59,7 @@ them). Otherwise a preset is chosen from what wrote the file
 | Imaris Stitcher / Viewer | `RAI` |
 | ImarisConvert (single Blaze tile) | `RPI` |
 
-Based on two files of one brain (`/nfs/trident3/lightsheet/khan/test_mind_{1x,4x}`).
+Based on two scans of one brain: a 4x scan stitched in Imaris and a 1x scan converted with ImarisConvert.
 
 ## Checking without a browser
 
@@ -68,3 +70,33 @@ node scripts/browser-panels.mjs http://localhost:4173 <image> out.png  # headles
 npx tsx scripts/render-views.ts <image.ims|folder.ome.zarr> <RAI|file> out.png [channel]  # the three views as a PNG
 node scripts/browser-smoke.mjs http://localhost:4173 <image> out.png  # headless Chromium, after `npx vite preview`
 ```
+
+## Deploying
+
+The site is static (`npm run build` writes `dist/`, with relative paths, so it
+works at any URL path). `.github/workflows/deploy.yml` runs the type check and
+tests, builds, and publishes to GitHub Pages on every push to `main`.
+
+On the free GitHub plan Pages needs a public repository. To set it up in a
+repository: Settings → Pages → Source: **GitHub Actions**. A project site is
+served under the owner's Pages domain:
+
+| Repository | URL |
+|---|---|
+| `khanlab/mind-spim-qc` | https://www.khanlab.ca/mind-spim-qc/ (the `khanlab.github.io` site has the custom domain `www.khanlab.ca`) |
+| `mind-western/<name>` | https://www.mind-western.ca/&lt;name&gt;/ (the `mind-western.github.io` site has the custom domain `www.mind-western.ca`) |
+
+To serve it on the MIND domain, either:
+
+- **Move the repository to the `mind-western` organization** (Settings →
+  Transfer ownership), then turn Pages on there with Source: GitHub Actions.
+  It is then at `https://www.mind-western.ca/<name>/` with no DNS change, and
+  GitHub redirects the old repository URL.
+- **Or give it its own subdomain**, e.g. `qc.mind-western.ca`, keeping the
+  repository where it is: add a DNS record `CNAME qc → khanlab.github.io` (for a
+  repository in `khanlab`) at the `mind-western.ca` DNS provider, then enter the
+  domain in Settings → Pages → Custom domain and tick Enforce HTTPS once the
+  certificate is issued.
+
+HTTPS matters: the folder picker (File System Access API) only works on secure
+pages. Nothing else is needed from the server (no special headers).
