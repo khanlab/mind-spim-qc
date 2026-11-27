@@ -135,13 +135,24 @@ export const PRESETS: Preset[] = [
   { id: "lifecanvas", label: "LifeCanvas", orientation: "RAS" },
 ];
 
-/** The preset to start from, from what wrote the file. */
-export function suggestPreset(format: string, metadata: Record<string, string>): Preset {
+/**
+ * The presets to offer for an image, with the one to start from: the orientation
+ * stored in the file if there is one, else a guess from what wrote the file.
+ */
+export function presetsFor(
+  format: string,
+  metadata: Record<string, string>,
+  fileOrientation?: string,
+): { presets: Preset[]; suggested: Preset } {
+  if (fileOrientation) {
+    const fromFile = { id: "file", label: "Stored in the file", orientation: fileOrientation };
+    return { presets: [fromFile, ...PRESETS], suggested: fromFile };
+  }
   const id =
     format === "imaris"
       ? /ImarisConvert/i.test(metadata.Creator ?? "")
         ? "imaris-convert"
         : "imaris-stitched"
       : "spimprep";
-  return PRESETS.find((p) => p.id === id)!;
+  return { presets: PRESETS, suggested: PRESETS.find((p) => p.id === id)! };
 }

@@ -13,10 +13,22 @@
     </header>
 
     <section id="drop" class="drop">
-      <p>Drop an Imaris <code>.ims</code> file here</p>
-      <label class="button">Choose file<input id="file-input" type="file" accept=".ims" hidden /></label>
+      <p>Drop an image here: an Imaris <code>.ims</code> file, an OME-Zarr folder or an <code>.ozx</code> file</p>
+      <div class="choose">
+        <label class="button">Choose file<input id="file-input" type="file" accept=".ims,.ozx,.zip" hidden /></label>
+        <button id="folder-button">Choose OME-Zarr folder</button>
+        <input id="folder-input" type="file" webkitdirectory hidden />
+      </div>
       <p id="status" class="status"></p>
     </section>
+
+    <div id="busy" class="busy" hidden>
+      <div class="busy-box">
+        <div class="spinner"></div>
+        <p id="busy-message"></p>
+        <progress id="busy-bar" max="1"></progress>
+      </div>
+    </div>
 
     <main id="app" hidden>
       <aside>

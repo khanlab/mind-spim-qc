@@ -9,6 +9,8 @@
   --warn: #f0b429;
   font: 14px/1.4 system-ui, sans-serif;
 }
+html { overflow-y: scroll; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); }
 header { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 16px; align-items: baseline; }
 h1 { font-size: 18px; margin: 0; }
@@ -42,7 +44,7 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 .rating { display: flex; gap: 12px; }
 .views { padding: 12px 16px; }
 .view-controls { display: flex; gap: 16px; align-items: center; margin-bottom: 8px; }
-#views { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+#views { display: grid; grid-template-columns: repeat(3, max-content); gap: 16px; align-items: start; }
 .view { display: grid; grid-template-columns: 16px auto 16px; grid-template-rows: 16px auto 16px auto; align-items: center; justify-items: center; font: 600 13px ui-monospace, monospace; color: var(--accent); }
 .view canvas { display: block; background: #000; }
 .view .title { grid-column: 1 / -1; color: var(--muted); font: 12px system-ui; }
@@ -50,3 +52,9 @@ input, select, textarea { background: var(--bg); color: var(--text); border: 1px
 aside select { width: 100%; }
 aside label { display: block; }
 .rating label, .check { display: inline; }
+.choose { display: flex; gap: 10px; justify-content: center; }
+.busy { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); display: grid; place-items: center; z-index: 10; }
+.busy-box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 24px 28px; width: 360px; text-align: center; }
+.busy-box progress { width: 100%; }
+.spinner { width: 32px; height: 32px; margin: 0 auto; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }

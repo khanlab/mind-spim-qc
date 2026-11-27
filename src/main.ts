@@ -1,57 +1,127 @@
-import {
-  PRESETS,
-  handedness,
-  isValid,
-  mirrorLR,
-  rotate,
-  suggestPreset,
-  type Preset,
-  type RotationAxis,
-} from "./orientation";
-import { overviewLevel, type ImageInfo, type Volume } from "./readers/types";
-import { VIEW_LABELS, autoWindow, composite, viewPlane, type Layer, type ViewName } from "./views";
-import type { Request } from "./worker";
+import { handedness, isValid, mirrorLR, presetsFor, rotate, type Preset, type RotationAxis } from "./orientation";
+import { readPlan, type ImageInfo, type ReadPlan, type Volume } from "./readers/types";
+import { VIEWS, VIEW_LABELS, composite, mipAxis, viewPlane, type Layer, type Mips, type ViewName } from "./views";
+import type { FetchReply, Notice, ReadResult, Request, Source } from "./worker";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
-// ---- worker ---------------------------------------------------------------
+// ---- busy popup ---------------------------------------------------------------
+
+function busy(message: string, fraction?: number) {
+  $("busy").hidden = false;
+  $("busy-message").textContent = message;
+  const bar = $<HTMLProgressElement>("busy-bar");
+  if (fraction === undefined) bar.removeAttribute("value");
+  else bar.value = fraction;
+}
+const idle = () => ($("busy").hidden = true);
+
+// ---- folders: files read on request of the worker --------------------------------
+
+/** A dropped or chosen folder: reads files by relative path. */
+interface Folder {
+  name: string;
+  read(path: string): Promise<File | null>;
+}
+
+function folderFromEntry(dir: FileSystemDirectoryEntry): Folder {
+  return {
+    name: dir.name,
+    read: (path) =>
+      new Promise((resolve) =>
+        dir.getFile(
+          path,
+          {},
+          (entry) => (entry as FileSystemFileEntry).file(resolve, () => resolve(null)),
+          () => resolve(null),
+        ),
+      ),
+  };
+}
+
+function folderFromHandle(dir: FileSystemDirectoryHandle): Folder {
+  return {
+    name: dir.name,
+    async read(path) {
+      try {
+        const parts = path.split("/");
+        let d = dir;
+        for (const p of parts.slice(0, -1)) d = await d.getDirectoryHandle(p);
+        return await (await d.getFileHandle(parts[parts.length - 1])).getFile();
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+/** From an <input webkitdirectory>, which lists every file up front. */
+function folderFromFileList(files: FileList): Folder {
+  const byPath = new Map<string, File>();
+  let name = "";
+  for (const f of Array.from(files)) {
+    const [root, ...rest] = f.webkitRelativePath.split("/");
+    name = root;
+    byPath.set(rest.join("/"), f);
+  }
+  return { name, read: async (path) => byPath.get(path) ?? null };
+}
+
+let folder: Folder | null = null;
+
+// ---- worker -------------------------------------------------------------------
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
 let nextId = 0;
-const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
-worker.onmessage = (e) => {
-  const { id, result, error } = e.data;
+const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; progress?: (f: number) => void }>();
+
+worker.onmessage = async (e) => {
+  const msg = e.data as Notice | { id: number; result?: any; error?: string };
+  if ("type" in msg && msg.type === "progress") return pending.get(msg.id)?.progress?.(msg.fraction);
+  if ("type" in msg && msg.type === "fetch") {
+    const file = folder ? await folder.read(msg.key) : null;
+    const bytes = file ? await file.arrayBuffer() : null;
+    const reply: FetchReply = { type: "fetched", fetchId: msg.fetchId, bytes };
+    worker.postMessage(reply, bytes ? [bytes] : []);
+    return;
+  }
+  const { id, result, error } = msg as { id: number; result?: any; error?: string };
   const p = pending.get(id);
   pending.delete(id);
   if (error) p?.reject(new Error(error));
   else p?.resolve(result);
 };
+
 type Body = Request extends infer R ? (R extends any ? Omit<R, "id"> : never) : never;
-function call<T>(body: Body): Promise<T> {
+function call<T>(body: Body, progress?: (f: number) => void): Promise<T> {
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    pending.set(id, { resolve, reject, progress });
     worker.postMessage({ ...body, id });
   });
 }
 
-// ---- state ----------------------------------------------------------------
+// ---- state --------------------------------------------------------------------
 
 interface ChannelState {
   volume: Volume;
+  mips: Mips;
   window: [number, number];
+  mipWindows: [number, number][];
   color: [number, number, number];
   visible: boolean;
   stain: string;
 }
 
 const state = {
-  file: null as File | null,
+  name: "",
+  size: null as number | null,
   info: null as ImageInfo | null,
-  level: 0,
+  plan: null as ReadPlan | null,
   channels: [] as ChannelState[],
-  preset: PRESETS[0] as Preset,
-  orientation: PRESETS[0].orientation,
+  presets: [] as Preset[],
+  preset: null as Preset | null,
+  orientation: "RAS",
   mode: "mip" as "mip" | "slice",
   position: { coronal: 0.5, sagittal: 0.5, axial: 0.5 } as Record<ViewName, number>,
 };
@@ -63,64 +133,85 @@ const DEFAULT_COLORS: [number, number, number][] = [
   [1, 1, 0],
 ];
 
-// ---- opening a file -------------------------------------------------------
+/** The file's colour for a channel, unless it is white or already taken; else an unused default. */
+function channelColor(
+  fromFile: [number, number, number] | undefined,
+  taken: [number, number, number][],
+  c: number,
+): [number, number, number] {
+  const same = (a: number[], b: number[]) => a.every((x, i) => Math.abs(x - b[i]) < 0.01);
+  if (fromFile && !fromFile.every((x) => x > 0.99) && !taken.some((t) => same(t, fromFile))) return fromFile;
+  return DEFAULT_COLORS.find((d) => !taken.some((t) => same(t, d))) ?? DEFAULT_COLORS[c % DEFAULT_COLORS.length];
+}
+
+// ---- opening --------------------------------------------------------------------
 
 const status = (msg: string, error = false) => {
   $("status").textContent = msg;
   $("status").classList.toggle("error", error);
 };
 
-async function open(file: File) {
+async function open(source: Source, size: number | null) {
+  const name = source.kind === "file" ? source.file.name : source.name;
   try {
-    status(`Opening ${file.name}…`);
-    const { info } = await call<{ info: ImageInfo }>({ type: "open", file });
-    state.file = file;
+    status("");
+    busy(`Opening ${name}…`);
+    const { info } = await call<{ info: ImageInfo }>({ type: "open", source });
+    state.name = name;
+    state.size = size;
     state.info = info;
-    state.level = overviewLevel(info);
-    state.preset = suggestPreset(info.format, info.metadata);
-    state.orientation = state.preset.orientation;
+    state.plan = readPlan(info);
+    const { presets, suggested } = presetsFor(info.format, info.metadata, info.orientation);
+    state.presets = presets;
+    state.preset = suggested;
+    state.orientation = suggested.orientation;
     state.channels = [];
-    showInfo();
-    $("drop").hidden = true;
-    $("app").hidden = false;
+    $<HTMLInputElement>("confirmed").checked = false;
 
-    const t0 = performance.now();
-    for (let c = 0; c < info.channels.length; c++) {
-      $("read-status").textContent = `Reading channel ${c + 1} of ${info.channels.length}…`;
-      const { volume } = await call<{ volume: Volume }>({ type: "read", level: state.level, channel: c });
+    const n = info.channels.length;
+    for (let c = 0; c < n; c++) {
+      const label = `Reading ${info.channels[c].name} (channel ${c + 1} of ${n})`;
+      busy(label, c / n);
+      const r = await call<ReadResult>({ type: "read", plan: state.plan, channel: c }, (f) => busy(label, (c + f) / n));
       state.channels.push({
-        volume,
-        window: autoWindow(volume.data),
-        color: DEFAULT_COLORS[c % DEFAULT_COLORS.length],
+        volume: r.volume,
+        mips: r.mips,
+        window: r.window,
+        mipWindows: r.mipWindows,
+        color: channelColor(info.channels[c].color, state.channels.map((ch) => ch.color), c),
         visible: true,
-        stain: "",
+        stain: /^Channel \d+$/.test(info.channels[c].name) ? "" : info.channels[c].name,
       });
     }
-    $("read-status").textContent = `Read in ${((performance.now() - t0) / 1000).toFixed(1)} s`;
+    $("drop").hidden = true;
+    $("app").hidden = false;
+    showInfo();
     showChannels();
     showOrientation();
+    measureViews();
     render();
   } catch (err) {
     status(String((err as Error).message ?? err), true);
-    $("drop").hidden = false;
-    $("app").hidden = true;
+  } finally {
+    idle();
   }
 }
 
 function showInfo() {
   const info = state.info!;
+  const plan = state.plan!;
   const l0 = info.levels[0];
-  const lv = info.levels[state.level];
   const fmt = (v: number[]) => v.map((x) => (x < 10 ? x.toFixed(2) : x.toFixed(0))).join(" × ");
   const rows: [string, string][] = [
-    ["Written by", info.metadata.Creator ?? "?"],
-    ["Recorded", info.metadata.RecordingDate ?? "?"],
+    ["Format", info.format === "imaris" ? "Imaris" : `OME-Zarr ${info.metadata.NGFF ?? ""}`],
+    ...(info.metadata.Creator ? [["Written by", info.metadata.Creator] as [string, string]] : []),
+    ...(info.metadata.RecordingDate ? [["Recorded", info.metadata.RecordingDate] as [string, string]] : []),
     ["Size (x × y × z)", fmt([...l0.shape].reverse())],
     ["Voxel (µm)", fmt([...l0.voxelSize].reverse())],
-    ["File size", `${(state.file!.size / 1e9).toFixed(1)} GB`],
-    ["Shown at", `level ${state.level}, ${fmt([...lv.voxelSize].reverse())} µm`],
+    ...(state.size ? [["File size", `${(state.size / 1e9).toFixed(1)} GB`] as [string, string]] : []),
+    ["Shown at", `level ${plan.level}, ${fmt([...plan.voxelSize].reverse())} µm`],
   ];
-  $("file-name").textContent = info.name;
+  $("file-name").textContent = state.name;
   $("file-info").replaceChildren(
     ...rows.flatMap(([k, v]) => {
       const dt = document.createElement("dt");
@@ -148,23 +239,24 @@ function showChannels() {
     sw.style.background = `rgb(${ch.color.map((x) => x * 255).join(",")})`;
     const name = document.createElement("input");
     name.type = "text";
-    name.placeholder = `${state.info!.channels[c].name}: stain?`;
+    name.value = ch.stain;
+    name.placeholder = `Channel ${c}: stain?`;
     name.oninput = () => (ch.stain = name.value.trim());
     row.append(vis, sw, name);
     box.append(row);
   });
 }
 
-// ---- orientation ----------------------------------------------------------
+// ---- orientation ------------------------------------------------------------------
 
 function showOrientation() {
   const sel = $<HTMLSelectElement>("preset");
   sel.replaceChildren(
-    ...PRESETS.map((p) => {
+    ...state.presets.map((p) => {
       const o = document.createElement("option");
       o.value = p.id;
-      o.textContent = `${p.label} (${p.orientation})${p.id === state.preset.id ? " – suggested" : ""}`;
-      o.selected = p.id === state.preset.id;
+      o.textContent = `${p.label} (${p.orientation})${p.id === state.preset!.id ? " – suggested" : ""}`;
+      o.selected = p.id === state.preset!.id;
       return o;
     }),
   );
@@ -183,15 +275,15 @@ function updateOrientation() {
   if (document.activeElement !== input) input.value = state.orientation;
   input.classList.remove("invalid");
   const warn = $("handedness");
-  const mirrored = handedness(state.orientation) !== handedness(state.preset.orientation);
+  const mirrored = handedness(state.orientation) !== handedness(state.preset!.orientation);
   warn.hidden = !mirrored;
   warn.textContent = mirrored
-    ? `Mirrored compared with "${state.preset.label}". A mirrored brain looks normal, so only keep this if you know this acquisition is mirrored.`
+    ? `Mirrored compared with "${state.preset!.label}". A mirrored brain looks normal, so only keep this if you know this acquisition is mirrored.`
     : "";
 }
 
 $<HTMLSelectElement>("preset").onchange = (e) => {
-  state.preset = PRESETS.find((p) => p.id === (e.target as HTMLSelectElement).value)!;
+  state.preset = state.presets.find((p) => p.id === (e.target as HTMLSelectElement).value)!;
   setOrientation(state.preset.orientation);
 };
 
@@ -218,78 +310,94 @@ $("mirror").onclick = () => {
     setOrientation(mirrorLR(state.orientation));
 };
 
-// ---- views ----------------------------------------------------------------
+// ---- views ----------------------------------------------------------------------
+//
+// Three fixed square boxes with the anatomical labels fixed around them, all at
+// one physical scale that fits the volume in any orientation: changing the
+// orientation turns the brain inside the boxes and moves nothing else.
 
 document.querySelectorAll<HTMLInputElement>('input[name="mode"]').forEach((r) => {
   r.onchange = () => ((state.mode = r.value as "mip" | "slice"), render());
 });
 
-const VIEW_BOX = 420; // px, longest side of a view
+const viewEls = new Map<ViewName, { canvas: HTMLCanvasElement; slider: HTMLInputElement }>();
 
-function render() {
-  const visible = state.channels.filter((c) => c.visible);
+function buildViews() {
   const box = $("views");
   box.replaceChildren();
-  if (!visible.length) return;
-  for (const view of ["coronal", "sagittal", "axial"] as ViewName[]) {
-    const pos = state.mode === "mip" ? "mip" : state.position[view];
-    const layers: Layer[] = visible.map((c) => {
-      const plane = viewPlane(c.volume, state.orientation, view, pos);
-      // a projection is brighter than any slice, so window it on itself
-      return { plane, window: pos === "mip" ? autoWindow(plane.values) : c.window, color: c.color };
-    });
-    const { plane } = layers[0];
-    const off = new OffscreenCanvas(plane.width, plane.height);
-    off.getContext("2d")!.putImageData(new ImageData(composite(layers) as any, plane.width, plane.height), 0, 0);
-    const physW = plane.width * plane.pixelSize[0];
-    const physH = plane.height * plane.pixelSize[1];
-    const scale = VIEW_BOX / Math.max(physW, physH);
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round(physW * scale);
-    canvas.height = Math.round(physH * scale);
-    const ctx = canvas.getContext("2d")!;
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
-
+  for (const view of VIEWS) {
     const [left, right, top, bottom] = VIEW_LABELS[view];
     const el = document.createElement("div");
     el.className = "view";
-    const cell = (text: string, style = "") => {
+    const cell = (text: string, cls = "") => {
       const s = document.createElement("span");
       s.textContent = text;
-      if (style) s.setAttribute("style", style);
+      if (cls) s.className = cls;
       return s;
     };
-    el.append(
-      cell(""), cell(top), cell(""),
-      cell(left), canvas, cell(right),
-      cell(""), cell(bottom), cell(""),
-    );
-    const title = cell(view);
-    title.className = "title";
-    el.append(title);
-    if (state.mode === "slice") {
-      const slider = document.createElement("input");
-      slider.type = "range";
-      slider.min = "0";
-      slider.max = "1";
-      slider.step = "0.005";
-      slider.value = String(state.position[view]);
-      slider.oninput = () => ((state.position[view] = Number(slider.value)), render());
-      el.append(slider);
-    }
+    const canvas = document.createElement("canvas");
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "0";
+    slider.max = "1";
+    slider.step = "0.005";
+    slider.value = String(state.position[view]);
+    slider.oninput = () => ((state.position[view] = Number(slider.value)), render());
+    el.append(cell(""), cell(top), cell(""), cell(left), canvas, cell(right), cell(""), cell(bottom), cell(""));
+    el.append(cell(view, "title"), slider);
     box.append(el);
+    viewEls.set(view, { canvas, slider });
   }
 }
+buildViews();
 
-// ---- export ---------------------------------------------------------------
+/** Box size in px: measured when an image is shown and when the window is resized, never on a redraw. */
+let boxPx = 400;
+function measureViews() {
+  const width = $("views").clientWidth;
+  boxPx = Math.max(200, Math.min(480, Math.floor((width - 3 * 40) / 3)));
+}
+
+function render() {
+  if (!state.channels.length) return;
+  const vol = state.channels[0].volume;
+  const extent = Math.max(...vol.shape.map((n, i) => n * vol.voxelSize[i]));
+  const scale = boxPx / extent; // px per um, the same for every view and orientation
+  const visible = state.channels.filter((c) => c.visible);
+
+  for (const view of VIEWS) {
+    const { canvas, slider } = viewEls.get(view)!;
+    slider.style.visibility = state.mode === "slice" ? "visible" : "hidden";
+    canvas.width = canvas.height = boxPx;
+    const ctx = canvas.getContext("2d")!;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, boxPx, boxPx);
+    if (!visible.length) continue;
+    const pos = state.mode === "mip" ? "mip" : state.position[view];
+    const layers: Layer[] = visible.map((c) => ({
+      plane: viewPlane(c.volume, c.mips, state.orientation, view, pos),
+      window: pos === "mip" ? c.mipWindows[mipAxis(state.orientation, view)] : c.window,
+      color: c.color,
+    }));
+    const { plane } = layers[0];
+    const off = new OffscreenCanvas(plane.width, plane.height);
+    off.getContext("2d")!.putImageData(new ImageData(composite(layers), plane.width, plane.height), 0, 0);
+    const w = plane.width * plane.pixelSize[0] * scale;
+    const h = plane.height * plane.pixelSize[1] * scale;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(off, (boxPx - w) / 2, (boxPx - h) / 2, w, h);
+  }
+}
+window.addEventListener("resize", () => (measureViews(), render()));
+
+// ---- export -----------------------------------------------------------------------
 
 $("export").onclick = () => {
   const info = state.info!;
   const l0 = info.levels[0];
   const rating = document.querySelector<HTMLInputElement>('input[name="rating"]:checked')?.value ?? null;
   const out = {
-    file: { name: state.file!.name, size: state.file!.size, lastModified: new Date(state.file!.lastModified).toISOString() },
+    image: { name: state.name, format: info.format, size: state.size },
     // BIDS microscopy sidecar fields, as SPIMpack and SPIMquant read them
     OrientationStringXYZ: state.orientation,
     PixelSize: [...l0.voxelSize].reverse().map((v) => Number((v / 1000).toPrecision(6))),
@@ -297,8 +405,9 @@ $("export").onclick = () => {
     SampleStaining: state.channels.map((c, i) => c.stain || info.channels[i].name),
     orientation: {
       confirmed: $<HTMLInputElement>("confirmed").checked,
-      preset: state.preset.id,
-      mirroredFromPreset: handedness(state.orientation) !== handedness(state.preset.orientation),
+      preset: state.preset!.id,
+      storedInFile: info.orientation ?? null,
+      mirroredFromPreset: handedness(state.orientation) !== handedness(state.preset!.orientation),
     },
     qc: { rating, note: $<HTMLTextAreaElement>("note").value },
     metadata: info.metadata,
@@ -307,25 +416,62 @@ $("export").onclick = () => {
   const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = state.file!.name.replace(/\.ims$/i, "") + "_qc.json";
+  a.download = state.name.replace(/(\.ome)?\.(ims|ozx|zarr|zip)$/i, "") + "_qc.json";
   a.click();
   URL.revokeObjectURL(a.href);
 };
 
-$("close").onclick = () => location.reload();
-
-// ---- drag and drop --------------------------------------------------------
-
-const drop = $("drop");
-drop.ondragover = (e) => (e.preventDefault(), drop.classList.add("over"));
-drop.ondragleave = () => drop.classList.remove("over");
-drop.ondrop = (e) => {
-  e.preventDefault();
-  drop.classList.remove("over");
-  const file = e.dataTransfer?.files[0];
-  if (file) open(file);
+$("close").onclick = () => {
+  $("app").hidden = true;
+  $("drop").hidden = false;
 };
+
+// ---- choosing and dropping ------------------------------------------------------------
+
+function openFile(file: File) {
+  folder = null;
+  open({ kind: "file", file }, file.size);
+}
+
+function openFolder(f: Folder) {
+  folder = f;
+  open({ kind: "folder", name: f.name }, null);
+}
+
+document.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  $("drop").classList.add("over");
+});
+document.addEventListener("dragleave", (e) => {
+  if (!e.relatedTarget) $("drop").classList.remove("over");
+});
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  $("drop").classList.remove("over");
+  const item = e.dataTransfer?.items[0];
+  const entry = item?.webkitGetAsEntry?.();
+  if (entry?.isDirectory) openFolder(folderFromEntry(entry as FileSystemDirectoryEntry));
+  else {
+    const file = e.dataTransfer?.files[0];
+    if (file) openFile(file);
+  }
+});
+
 $<HTMLInputElement>("file-input").onchange = (e) => {
   const file = (e.target as HTMLInputElement).files?.[0];
-  if (file) open(file);
+  if (file) openFile(file);
+};
+
+$("folder-button").onclick = async () => {
+  const picker = (window as any).showDirectoryPicker as (() => Promise<FileSystemDirectoryHandle>) | undefined;
+  if (!picker) return $("folder-input").click();
+  try {
+    openFolder(folderFromHandle(await picker()));
+  } catch {
+    /* cancelled */
+  }
+};
+$<HTMLInputElement>("folder-input").onchange = (e) => {
+  const files = (e.target as HTMLInputElement).files;
+  if (files?.length) openFolder(folderFromFileList(files));
 };

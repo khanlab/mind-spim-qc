@@ -14,6 +14,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@zarrita/storage": "^0.2.1",
     "h5wasm": "^0.10.3",
     "zarrita": "^0.7.6"
   },

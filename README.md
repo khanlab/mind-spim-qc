@@ -11,7 +11,12 @@ npm test           # orientation unit tests
 npm run build      # static site in dist/
 ```
 
-Supported so far: Imaris `.ims`. OME-Zarr is planned.
+Reads Imaris `.ims` files, OME-Zarr folders (NGFF 0.4/0.5, dropped or chosen)
+and `.ozx` (zipped OME-Zarr). The overview is read from the finest pyramid level
+that fits 32M voxels per channel, stepping through axes much finer than the
+others (some pyramids never downsample z). The worker computes the projections
+along the three array axes once; the views of any orientation are flips and
+transposes of these, so rotating is instant.
 
 ## Orientation
 
@@ -20,7 +25,12 @@ Supported so far: Imaris `.ims`. OME-Zarr is planned.
 neurological convention with labelled edges; the rotate buttons keep handedness,
 and mirroring is a separate, confirmed step, since a mirrored brain looks normal.
 
-The starting preset is chosen from what wrote the file
+The views stay fixed (same boxes, labels and scale); only the brain turns
+inside them.
+
+The starting orientation is the one stored in the file if there is one (OME-Zarr
+`xyz_orientation`, or the legacy `orientation` in Z, Y, X order, as zarrnii reads
+them). Otherwise a preset is chosen from what wrote the file
 (`DataSetInfo/ImarisDataSet` `Creator`):
 
 | Written by | Preset |
@@ -33,6 +43,6 @@ Based on two files of one brain (`/nfs/trident3/lightsheet/khan/test_mind_{1x,4x
 ## Checking without a browser
 
 ```bash
-npx tsx scripts/render-views.ts file.ims RAI out.png [channel]   # the three views as a PNG
-node scripts/browser-smoke.mjs http://localhost:4173 file.ims out.png  # headless Chromium, after `npx vite preview`
+npx tsx scripts/render-views.ts <image.ims|folder.ome.zarr> <RAI|file> out.png [channel]  # the three views as a PNG
+node scripts/browser-smoke.mjs http://localhost:4173 <image> out.png  # headless Chromium, after `npx vite preview`
 ```

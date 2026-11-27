@@ -7,11 +7,16 @@
  *   coronal  - fixed A: horizontal L -> R, vertical I -> S (S at top)
  *   sagittal - fixed R: horizontal P -> A, vertical I -> S (S at top)
  *   axial    - fixed S: horizontal L -> R, vertical P -> A (A at top)
+ *
+ * Projections are computed once along each array axis (`arrayMips`); the
+ * projection of any view in any orientation is one of them, flipped or
+ * transposed, so changing the orientation needs no pass over the volume.
  */
 import { rasAxisMap } from "./orientation";
 import type { Volume } from "./readers/types";
 
 export type ViewName = "coronal" | "sagittal" | "axial";
+export const VIEWS: ViewName[] = ["coronal", "sagittal", "axial"];
 
 /** RAS axes (0=R, 1=A, 2=S) of each view: [horizontal, vertical, through]. */
 export const VIEW_AXES: Record<ViewName, [number, number, number]> = {
@@ -27,12 +32,50 @@ export const VIEW_LABELS: Record<ViewName, [string, string, string, string]> = {
   axial: ["L", "R", "A", "P"],
 };
 
+/**
+ * Maximum intensity projections along the array axes z, y, x: 2D images of
+ * (y, x), (z, x) and (z, y), row-major.
+ */
+export type Mips = [Float32Array, Float32Array, Float32Array];
+
+export function arrayMips(vol: Volume): Mips {
+  const [nz, ny, nx] = vol.shape;
+  const d = vol.data;
+  const mz = new Float32Array(ny * nx).fill(-Infinity);
+  const my = new Float32Array(nz * nx).fill(-Infinity);
+  const mx = new Float32Array(nz * ny).fill(-Infinity);
+  let i = 0;
+  for (let z = 0; z < nz; z++)
+    for (let y = 0; y < ny; y++) {
+      let rowMax = -Infinity;
+      const yz = y * nx;
+      const zx = z * nx;
+      for (let x = 0; x < nx; x++, i++) {
+        const v = d[i];
+        if (v > mz[yz + x]) mz[yz + x] = v;
+        if (v > my[zx + x]) my[zx + x] = v;
+        if (v > rowMax) rowMax = v;
+      }
+      mx[z * ny + y] = rowMax;
+    }
+  return [mz, my, mx];
+}
+
+/** Strides of image axes X, Y, Z in the volume and in each projection (0 = projected away). */
+function strides(shape: [number, number, number], source: "volume" | 0 | 1 | 2): [number, number, number] {
+  const [, ny, nx] = shape;
+  if (source === "volume") return [1, nx, nx * ny];
+  if (source === 0) return [1, nx, 0]; // along z: (y, x)
+  if (source === 1) return [1, 0, nx]; // along y: (z, x)
+  return [0, 1, ny]; // along x: (z, y)
+}
+
 /** Size of the volume along R, A, S (voxels) and voxel size along R, A, S (um). */
-export function rasGeometry(vol: Volume, orientation: string) {
+export function rasGeometry(shape: [number, number, number], voxelSize: [number, number, number], orientation: string) {
   const map = rasAxisMap(orientation);
   // image axis i (0=X, 1=Y, 2=Z) is array axis 2-i of the z,y,x data
-  const size = map.map((m) => vol.shape[2 - m.imageAxis]) as [number, number, number];
-  const spacing = map.map((m) => vol.voxelSize[2 - m.imageAxis]) as [number, number, number];
+  const size = map.map((m) => shape[2 - m.imageAxis]) as [number, number, number];
+  const spacing = map.map((m) => voxelSize[2 - m.imageAxis]) as [number, number, number];
   return { map, size, spacing };
 }
 
@@ -45,53 +88,56 @@ export interface Plane {
   pixelSize: [number, number];
 }
 
+/** Which projection a view uses under an orientation: the array axis projected along. */
+export function mipAxis(orientation: string, view: ViewName): 0 | 1 | 2 {
+  const t = VIEW_AXES[view][2];
+  return (2 - rasAxisMap(orientation)[t].imageAxis) as 0 | 1 | 2;
+}
+
 /**
- * A slice (at `position`, 0..1 along the through axis) or a maximum intensity
- * projection (position = "mip") of the volume in an anatomical view.
+ * A slice (at `position`, 0..1 along the through axis) or the maximum intensity
+ * projection (position = "mip") of a volume in an anatomical view.
  */
-export function viewPlane(vol: Volume, orientation: string, view: ViewName, position: number | "mip"): Plane {
-  const { map, size, spacing } = rasGeometry(vol, orientation);
+export function viewPlane(
+  vol: Volume,
+  mips: Mips | null,
+  orientation: string,
+  view: ViewName,
+  position: number | "mip",
+): Plane {
+  const { map, size, spacing } = rasGeometry(vol.shape, vol.voxelSize, orientation);
   const [h, v, t] = VIEW_AXES[view];
   const width = size[h];
   const height = size[v];
-  const [nz, ny, nx] = vol.shape;
-  // strides of image axes X, Y, Z in the flat z,y,x array
-  const stride = [1, nx, nx * ny];
 
-  // index into the data from a RAS voxel coordinate along axis k
-  const axisOffset = (k: number, i: number) => {
-    const m = map[k];
-    return (m.flip ? size[k] - 1 - i : i) * stride[m.imageAxis];
-  };
+  let data: ArrayLike<number>;
+  let stride: [number, number, number];
+  let tIndex = 0;
+  if (position === "mip") {
+    const axis = mipAxis(orientation, view);
+    if (!mips) throw new Error("Projections not computed");
+    data = mips[axis];
+    stride = strides(vol.shape, axis);
+  } else {
+    data = vol.data;
+    stride = strides(vol.shape, "volume");
+    tIndex = Math.min(size[t] - 1, Math.max(0, Math.round(position * (size[t] - 1))));
+  }
+  // offset of voxel i along RAS axis k
+  const off = (k: number, i: number) => (map[k].flip ? size[k] - 1 - i : i) * stride[map[k].imageAxis];
 
   const values = new Float32Array(width * height);
-  const data = vol.data;
-  const tRange =
-    position === "mip"
-      ? [0, size[t]]
-      : (() => {
-          const i = Math.min(size[t] - 1, Math.max(0, Math.round(position * (size[t] - 1))));
-          return [i, i + 1];
-        })();
-  void nz;
-
+  const base = off(t, tIndex);
+  const hStep = (map[h].flip ? -1 : 1) * stride[map[h].imageAxis];
   for (let row = 0; row < height; row++) {
     // top row is the high end of the vertical axis (S or A)
-    const vOff = axisOffset(v, height - 1 - row);
-    for (let col = 0; col < width; col++) {
-      const base = vOff + axisOffset(h, col);
-      let best = -Infinity;
-      for (let i = tRange[0]; i < tRange[1]; i++) {
-        const x = data[base + axisOffset(t, i)];
-        if (x > best) best = x;
-      }
-      values[row * width + col] = best;
-    }
+    let o = base + off(v, height - 1 - row) + off(h, 0);
+    for (let col = 0; col < width; col++, o += hStep) values[row * width + col] = data[o];
   }
   return { width, height, values, pixelSize: [spacing[h], spacing[v]] };
 }
 
-/** Display window from percentiles of a (sub-sampled) volume, ignoring zeros (padding, outside the sample). */
+/** Display window from percentiles of a (sub-sampled) image, ignoring zeros (padding, outside the sample). */
 export function autoWindow(data: ArrayLike<number>, lo = 0.5, hi = 99.8): [number, number] {
   const step = Math.max(1, Math.floor(data.length / 1_000_000));
   const sample: number[] = [];
@@ -111,7 +157,7 @@ export interface Layer {
 }
 
 /** Additive composite of channels into RGBA bytes. */
-export function composite(layers: Layer[]): Uint8ClampedArray {
+export function composite(layers: Layer[]): Uint8ClampedArray<ArrayBuffer> {
   const { width, height } = layers[0].plane;
   const rgba = new Uint8ClampedArray(width * height * 4);
   const acc = new Float32Array(width * height * 3);

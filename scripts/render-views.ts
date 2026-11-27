@@ -1,36 +1,43 @@
 /**
- * Render the coronal, sagittal and axial MIPs of an Imaris file under an
- * orientation string to a PNG, with the same code as the web app, to check
- * orientations without a browser.
+ * Render the coronal, sagittal and axial MIPs of an image (Imaris file or
+ * OME-Zarr folder) under an orientation string to a PNG, with the same code as
+ * the web app, to check orientations without a browser. Orientation "file" uses
+ * the one stored in the image.
  *
- *   npx tsx scripts/render-views.ts file.ims RAI out.png [channel]
+ *   npx tsx scripts/render-views.ts image RAI out.png [channel]
  */
 import { writeFileSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import h5wasm from "h5wasm/node";
-import { readImsInfo, readImsVolume } from "../src/readers/ims";
-import { overviewLevel } from "../src/readers/types";
-import { autoWindow, composite, viewPlane, type ViewName } from "../src/views";
+import { FileSystemStore } from "@zarrita/storage";
+import { ImsReader } from "../src/readers/ims";
+import { OmeZarrReader } from "../src/readers/omezarr";
+import { readPlan, type ImageReader } from "../src/readers/types";
+import { arrayMips, autoWindow, composite, viewPlane, type ViewName } from "../src/views";
 
-const [path, orientation, out, channelArg] = process.argv.slice(2);
-await h5wasm.ready;
-const f = new h5wasm.File(path, "r");
-const info = readImsInfo(f, path);
-const level = overviewLevel(info, Number(process.env.BUDGET ?? 8 * 1024 * 1024));
+const [path, orientationArg, out, channelArg] = process.argv.slice(2);
+let reader: ImageReader;
+if (path.endsWith(".ims")) {
+  await h5wasm.ready;
+  reader = new ImsReader(new h5wasm.File(path, "r"), path);
+} else reader = await OmeZarrReader.open(new FileSystemStore(path), path);
+const info = reader.info;
+const orientation = orientationArg === "file" ? info.orientation! : orientationArg;
+const plan = readPlan(info, Number(process.env.BUDGET ?? 8 * 1024 * 1024));
 const channel = Number(channelArg ?? info.channels.length - 1);
 const t0 = performance.now();
-const vol = readImsVolume(f, info, level, channel);
-console.log(`level ${level} ${vol.shape} voxel ${vol.voxelSize.map((v) => v.toFixed(1))} um, read ${(performance.now() - t0).toFixed(0)} ms`);
-const window = autoWindow(vol.data);
+const vol = await reader.read(plan, channel, () => {});
+const mips = arrayMips(vol);
+console.log(`${orientation}: level ${plan.level} step ${plan.step} ${vol.shape} voxel ${vol.voxelSize.map((v) => v.toFixed(1))} um, read ${(performance.now() - t0).toFixed(0)} ms`);
 
 // each view resampled to square pixels of `px` um (nearest neighbour), side by side
 const views: ViewName[] = ["coronal", "sagittal", "axial"];
-const planes = views.map((v) => viewPlane(vol, orientation, v, "mip"));
+const planes = views.map((v) => viewPlane(vol, mips, orientation, v, "mip"));
 const px = Math.min(...planes.flatMap((p) => p.pixelSize));
 const imgs = planes.map((p) => {
   const w = Math.round((p.width * p.pixelSize[0]) / px);
   const h = Math.round((p.height * p.pixelSize[1]) / px);
-  const rgba = composite([{ plane: p, window, color: [1, 1, 1] }]);
+  const rgba = composite([{ plane: p, window: autoWindow(p.values), color: [1, 1, 1] }]);
   return { w, h, at: (x: number, y: number) => 4 * (Math.floor((y * p.height) / h) * p.width + Math.floor((x * p.width) / w)), rgba };
 });
 const gap = 8;

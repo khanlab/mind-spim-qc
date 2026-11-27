@@ -10,7 +10,7 @@
  * Works on an h5wasm File in Node or in a browser worker.
  */
 import type { File as H5File, Group, Dataset } from "h5wasm";
-import type { ChannelInfo, ImageInfo, LevelInfo, Volume, Voxels } from "./types";
+import type { ChannelInfo, ImageInfo, ImageReader, LevelInfo, Progress, ReadPlan, Volume, Voxels } from "./types";
 
 function attrString(g: Group | Dataset, key: string): string | undefined {
   const a = g.attrs[key];
@@ -94,14 +94,42 @@ export function readImsInfo(f: H5File, name: string): ImageInfo {
   return { format: "imaris", name, dtype, channels, levels, metadata };
 }
 
-/** One channel of one level, cropped to the image (no chunk padding). */
-export function readImsVolume(f: H5File, info: ImageInfo, level: number, channel: number): Volume {
-  const { shape, voxelSize } = info.levels[level];
-  const d = dataset(f, level, channel);
-  const data = d.slice([
-    [0, shape[0]],
-    [0, shape[1]],
-    [0, shape[2]],
-  ]) as unknown as Voxels;
-  return { shape, voxelSize, data };
+/** Reads one channel of a level in slabs along z, with progress, stepping as planned. */
+export function readImsVolume(f: H5File, info: ImageInfo, plan: ReadPlan, channel: number, progress: Progress = () => {}): Volume {
+  const [nz, ny, nx] = info.levels[plan.level].shape;
+  const [sz, sy, sx] = plan.step;
+  const [oz, oy, ox] = plan.shape;
+  const d = dataset(f, plan.level, channel);
+  // slabs of about 1/20 of the image, a whole number of z steps
+  const slab = Math.max(sz, Math.ceil(Math.ceil(nz / 20) / sz) * sz);
+  let out: Voxels | null = null;
+  for (let z0 = 0; z0 < nz; z0 += slab) {
+    const z1 = Math.min(nz, z0 + slab);
+    const part = d.slice([[z0, z1], [0, ny], [0, nx]]) as unknown as Voxels;
+    if (!out) out = new (part.constructor as new (n: number) => Voxels)(oz * oy * ox);
+    for (let z = z0; z < z1; z += sz) {
+      const zi = z / sz;
+      for (let y = 0, yi = 0; y < ny; y += sy, yi++) {
+        const src = ((z - z0) * ny + y) * nx;
+        const dst = (zi * oy + yi) * ox;
+        if (sx === 1) out.set(part.subarray(src, src + nx), dst);
+        else for (let x = 0, xi = 0; x < nx; x += sx, xi++) out[dst + xi] = part[src + x];
+      }
+    }
+    progress(z1 / nz);
+  }
+  return { shape: plan.shape, voxelSize: plan.voxelSize, data: out! };
+}
+
+export class ImsReader implements ImageReader {
+  info: ImageInfo;
+  constructor(private file: H5File, name: string) {
+    this.info = readImsInfo(file, name);
+  }
+  async read(plan: ReadPlan, channel: number, progress: Progress) {
+    return readImsVolume(this.file, this.info, plan, channel, progress);
+  }
+  close() {
+    this.file.close();
+  }
 }
