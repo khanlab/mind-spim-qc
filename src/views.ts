@@ -179,3 +179,39 @@ export function composite(layers: Layer[]): Uint8ClampedArray<ArrayBuffer> {
   }
   return rgba;
 }
+
+/** Array voxel (z, y, x) of a RAS voxel coordinate under an orientation. */
+export function rasToArray(orientation: string, shape: [number, number, number], ras: number[]): [number, number, number] {
+  const map = rasAxisMap(orientation);
+  const size = map.map((m) => shape[2 - m.imageAxis]);
+  const xyz = [0, 0, 0];
+  map.forEach((m, k) => (xyz[m.imageAxis] = m.flip ? size[k] - 1 - ras[k] : ras[k]));
+  return [xyz[2], xyz[1], xyz[0]];
+}
+
+/** RAS voxel coordinate of an array voxel (z, y, x) under an orientation. */
+export function arrayToRas(orientation: string, shape: [number, number, number], zyx: number[]): [number, number, number] {
+  const map = rasAxisMap(orientation);
+  const size = map.map((m) => shape[2 - m.imageAxis]);
+  const xyz = [zyx[2], zyx[1], zyx[0]];
+  return map.map((m, k) => (m.flip ? size[k] - 1 - xyz[m.imageAxis] : xyz[m.imageAxis])) as [number, number, number];
+}
+
+/** Along the through axis of a view at (col, row): the depth of the brightest voxel. */
+export function brightestDepth(vol: Volume, orientation: string, view: ViewName, col: number, row: number): number {
+  const { size } = rasGeometry(vol.shape, vol.voxelSize, orientation);
+  const [h, v, t] = VIEW_AXES[view];
+  const ras = [0, 0, 0];
+  ras[h] = col;
+  ras[v] = size[v] - 1 - row;
+  const [, ny, nx] = vol.shape;
+  let best = 0;
+  let bestV = -Infinity;
+  for (let i = 0; i < size[t]; i++) {
+    ras[t] = i;
+    const [z, y, x] = rasToArray(orientation, vol.shape, ras);
+    const val = vol.data[(z * ny + y) * nx + x];
+    if (val > bestV) (bestV = val), (best = i);
+  }
+  return best;
+}

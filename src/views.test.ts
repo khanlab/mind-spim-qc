@@ -77,3 +77,35 @@ describe("views", () => {
     expect(plan.voxelSize).toEqual([49.5, 52, 52]);
   });
 });
+
+import { arrayToRas, rasToArray } from "./views";
+import { overviewToLevel0, level0ToOverview } from "./readers/types";
+
+describe("coordinates", () => {
+  it("maps array voxels to RAS and back in every orientation", () => {
+    for (const o of allOrientations()) {
+      const zyx = [1, 5, 7];
+      expect(rasToArray(o, shape, arrayToRas(o, shape, zyx))).toEqual(zyx);
+    }
+  });
+
+  it("maps overview voxels to level 0 and back", () => {
+    const info: ImageInfo = {
+      format: "imaris",
+      name: "t",
+      dtype: "uint16",
+      channels: [{ name: "a" }],
+      metadata: {},
+      levels: [
+        { shape: [1061, 2560, 2160], voxelSize: [5, 5.9, 5.9] },
+        { shape: [530, 1280, 1080], voxelSize: [10, 11.8, 11.8] },
+        { shape: [265, 640, 540], voxelSize: [20, 23.6, 23.6] },
+      ],
+    };
+    const plan = readPlan(info, 5_000_000);
+    for (const at of [[0, 0, 0], [100, 300, 200], [plan.shape[0] - 1, plan.shape[1] - 1, plan.shape[2] - 1]] as [number, number, number][]) {
+      const back = level0ToOverview(info, plan, overviewToLevel0(info, plan, at));
+      back.forEach((v, a) => expect(Math.abs(v - at[a])).toBeLessThan(0.5));
+    }
+  });
+});

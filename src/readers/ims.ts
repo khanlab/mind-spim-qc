@@ -10,7 +10,7 @@
  * Works on an h5wasm File in Node or in a browser worker.
  */
 import type { File as H5File, Group, Dataset } from "h5wasm";
-import type { ChannelInfo, ImageInfo, ImageReader, LevelInfo, Progress, ReadPlan, Volume, Voxels } from "./types";
+import type { Box, ChannelInfo, ImageInfo, ImageReader, LevelInfo, Progress, ReadPlan, Volume, Voxels } from "./types";
 
 function attrString(g: Group | Dataset, key: string): string | undefined {
   const a = g.attrs[key];
@@ -128,6 +128,16 @@ export class ImsReader implements ImageReader {
   }
   async read(plan: ReadPlan, channel: number, progress: Progress) {
     return readImsVolume(this.file, this.info, plan, channel, progress);
+  }
+  async readBox(box: Box, channel: number): Promise<Volume> {
+    const d = dataset(this.file, box.level, channel);
+    const data = d.slice([0, 1, 2].map((a) => [box.start[a], box.stop[a]])) as unknown as Voxels;
+    const shape = box.stop.map((v, a) => v - box.start[a]) as [number, number, number];
+    return { shape, voxelSize: this.info.levels[box.level].voxelSize, data };
+  }
+  chunks(level: number): [number, number, number] {
+    const c = (dataset(this.file, level, 0).metadata as { chunks?: number[] | null }).chunks;
+    return (c?.length === 3 ? c : [32, 128, 128]) as [number, number, number];
   }
   close() {
     this.file.close();

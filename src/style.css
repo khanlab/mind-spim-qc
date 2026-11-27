@@ -58,3 +58,27 @@ aside label { display: block; }
 .busy-box progress { width: 100%; }
 .spinner { width: 32px; height: 32px; margin: 0 auto; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+h3.section { font-size: 14px; color: var(--text); text-transform: none; letter-spacing: 0; margin: 28px 0 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.tag { font-size: 11px; color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 0 4px; margin-left: 6px; font-weight: 400; }
+.view canvas { cursor: crosshair; }
+.zoom-controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-bottom: 10px; }
+.zoom-controls input[type="range"] { width: 140px; vertical-align: middle; }
+.zoom-controls input.narrow { width: 4em; }
+.zooms { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.zoom { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 300px; }
+.zoom canvas { display: block; background: #000; }
+.zoom input[type="range"] { width: 100%; }
+.zoom-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.zoom-head .close { background: none; color: var(--muted); padding: 0 4px; font-size: 18px; }
+.zoom-loading { height: 200px; display: grid; place-items: center; }
+.plane-label { color: var(--muted); font-size: 11px; margin: 6px 0 2px; }
+.zoom-meta { color: var(--muted); font-size: 11px; margin-top: 6px; }
+table.metrics { border-collapse: collapse; font-size: 13px; margin: 4px 0 8px; }
+table.metrics th, table.metrics td { padding: 3px 12px 3px 0; text-align: right; border-bottom: 1px solid var(--line); }
+table.metrics th:first-child, table.metrics td:first-child { text-align: left; color: var(--muted); }
+table.metrics td[title]:first-child { text-decoration: underline dotted; cursor: help; }
+table.metrics td.warn { color: var(--warn); }
+.psf-results { display: flex; gap: 32px; flex-wrap: wrap; align-items: flex-start; }
+.avg-spot { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; max-width: 400px; }
+.avg-spot canvas { display: block; background: #000; }
+.avg-spot p { flex-basis: 100%; margin: 0; }

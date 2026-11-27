@@ -10,6 +10,7 @@ import type { Readable } from "@zarrita/storage";
 import { isValid } from "../orientation";
 import {
   asVoxels,
+  type Box,
   type ChannelInfo,
   type ImageInfo,
   type ImageReader,
@@ -148,6 +149,34 @@ export class OmeZarrReader implements ImageReader {
       progress(z1 / nz);
     }
     return { shape: plan.shape, voxelSize: plan.voxelSize, data: out! };
+  }
+
+  async readBox(box: Box, channel: number): Promise<Volume> {
+    const arr = this.arrays[box.level];
+    const { dims } = this;
+    const sel: (number | zarr.Slice | null)[] = arr.shape.map(() => null);
+    if (dims.t >= 0) sel[dims.t] = 0;
+    if (dims.c >= 0) sel[dims.c] = channel;
+    (["z", "y", "x"] as const).forEach((d, a) => (sel[dims[d]] = zarr.slice(box.start[a], box.stop[a])));
+    const part = await zarr.get(arr, sel);
+    const shape = box.stop.map((v, a) => v - box.start[a]) as [number, number, number];
+    const kept = [dims.z, dims.y, dims.x].sort((a, b) => a - b);
+    let data = asVoxels(part.data as any);
+    if (!(kept[0] === dims.z && kept[1] === dims.y)) {
+      const out = new (data.constructor as new (n: number) => Voxels)(data.length);
+      const st = [dims.z, dims.y, dims.x].map((d) => part.stride[kept.indexOf(d)]);
+      for (let z = 0, i = 0; z < shape[0]; z++)
+        for (let y = 0; y < shape[1]; y++)
+          for (let x = 0; x < shape[2]; x++, i++) out[i] = data[z * st[0] + y * st[1] + x * st[2]];
+      data = out;
+    }
+    return { shape, voxelSize: this.info.levels[box.level].voxelSize, data };
+  }
+
+  chunks(level: number): [number, number, number] {
+    const c = this.arrays[level].chunks;
+    const { dims } = this;
+    return [c[dims.z], c[dims.y], c[dims.x]];
   }
 
   close() {}

@@ -1,7 +1,25 @@
 import { handedness, isValid, mirrorLR, presetsFor, rotate, type Preset, type RotationAxis } from "./orientation";
-import { readPlan, type ImageInfo, type ReadPlan, type Volume } from "./readers/types";
-import { VIEWS, VIEW_LABELS, composite, mipAxis, viewPlane, type Layer, type Mips, type ViewName } from "./views";
-import type { FetchReply, Notice, ReadResult, Request, Source } from "./worker";
+import { level0ToOverview, overviewToLevel0, readPlan, type ImageInfo, type ReadPlan, type Volume } from "./readers/types";
+import {
+  VIEWS,
+  VIEW_AXES,
+  VIEW_LABELS,
+  arrayToRas,
+  brightestDepth,
+  composite,
+  mipAxis,
+  rasGeometry,
+  rasToArray,
+  viewPlane,
+  type Layer,
+  type Mips,
+  type ViewName,
+} from "./views";
+import type { ChannelMetrics, FetchReply, Notice, ReadResult, Request, Source } from "./worker";
+import type { AppContext, Marker } from "./panels/context";
+import { ZoomPanel } from "./panels/zooms";
+import { PsfPanel } from "./panels/psf";
+import { renderMetrics } from "./panels/metrics";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -104,6 +122,7 @@ function call<T>(body: Body, progress?: (f: number) => void): Promise<T> {
 // ---- state --------------------------------------------------------------------
 
 interface ChannelState {
+  metrics: ChannelMetrics;
   volume: Volume;
   mips: Mips;
   window: [number, number];
@@ -174,6 +193,7 @@ async function open(source: Source, size: number | null) {
       busy(label, c / n);
       const r = await call<ReadResult>({ type: "read", plan: state.plan, channel: c }, (f) => busy(label, (c + f) / n));
       state.channels.push({
+        metrics: r.metrics,
         volume: r.volume,
         mips: r.mips,
         window: r.window,
@@ -190,6 +210,7 @@ async function open(source: Source, size: number | null) {
     showOrientation();
     measureViews();
     render();
+    startPanels();
   } catch (err) {
     status(String((err as Error).message ?? err), true);
   } finally {
@@ -321,6 +342,8 @@ document.querySelectorAll<HTMLInputElement>('input[name="mode"]').forEach((r) =>
 });
 
 const viewEls = new Map<ViewName, { canvas: HTMLCanvasElement; slider: HTMLInputElement }>();
+/** Where each view's plane is drawn: offset (px), px per plane pixel, and the plane size. */
+const drawn = new Map<ViewName, { ox: number; oy: number; sx: number; sy: number; width: number; height: number }>();
 
 function buildViews() {
   const box = $("views");
@@ -346,6 +369,8 @@ function buildViews() {
     el.append(cell(""), cell(top), cell(""), cell(left), canvas, cell(right), cell(""), cell(bottom), cell(""));
     el.append(cell(view, "title"), slider);
     box.append(el);
+    canvas.onclick = (e) => onViewClick(view, e);
+    canvas.title = "Click to add a full-resolution zoom here";
     viewEls.set(view, { canvas, slider });
   }
 }
@@ -385,10 +410,98 @@ function render() {
     const w = plane.width * plane.pixelSize[0] * scale;
     const h = plane.height * plane.pixelSize[1] * scale;
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(off, (boxPx - w) / 2, (boxPx - h) / 2, w, h);
+    const ox = (boxPx - w) / 2;
+    const oy = (boxPx - h) / 2;
+    ctx.drawImage(off, ox, oy, w, h);
+    const t = { ox, oy, sx: w / plane.width, sy: h / plane.height, width: plane.width, height: plane.height };
+    drawn.set(view, t);
+    drawMarkers(ctx, view, t);
   }
 }
+
+function drawMarkers(ctx: CanvasRenderingContext2D, view: ViewName, t: { ox: number; oy: number; sx: number; sy: number; height: number }) {
+  const vol = state.channels[0].volume;
+  const [h, v] = VIEW_AXES[view];
+  ctx.font = "600 11px system-ui";
+  ctx.lineWidth = 1.5;
+  for (const m of markers()) {
+    const ov = level0ToOverview(state.info!, state.plan!, m.level0);
+    const ras = arrayToRas(state.orientation, vol.shape, ov);
+    const x = t.ox + (ras[h] + 0.5) * t.sx;
+    const y = t.oy + (t.height - 1 - ras[v] + 0.5) * t.sy;
+    ctx.strokeStyle = ctx.fillStyle = m.kind === "zoom" ? "#ffd60a" : "#ff6b9d";
+    ctx.beginPath();
+    if (m.kind === "zoom") ctx.arc(x, y, 6, 0, 2 * Math.PI);
+    else ctx.rect(x - 5, y - 5, 10, 10);
+    ctx.stroke();
+    ctx.fillText(m.label, x + 8, y - 6);
+  }
+}
+
+/** A click on a view adds a zoom there: at the slice shown, or the brightest voxel along the projection. */
+function onViewClick(view: ViewName, e: MouseEvent) {
+  const t = drawn.get(view);
+  if (!t || !zoomPanel) return;
+  const canvas = viewEls.get(view)!.canvas;
+  const rect = canvas.getBoundingClientRect();
+  const px = ((e.clientX - rect.left) * canvas.width) / rect.width;
+  const py = ((e.clientY - rect.top) * canvas.height) / rect.height;
+  const col = Math.floor((px - t.ox) / t.sx);
+  const row = Math.floor((py - t.oy) / t.sy);
+  if (col < 0 || row < 0 || col >= t.width || row >= t.height) return;
+  const vis = state.channels.find((c) => c.visible) ?? state.channels[0];
+  const vol = vis.volume;
+  const { size } = rasGeometry(vol.shape, vol.voxelSize, state.orientation);
+  const [h, v, th] = VIEW_AXES[view];
+  const ras = [0, 0, 0];
+  ras[h] = col;
+  ras[v] = t.height - 1 - row;
+  ras[th] =
+    state.mode === "mip"
+      ? brightestDepth(vol, state.orientation, view, col, row)
+      : Math.round(state.position[view] * (size[th] - 1));
+  zoomPanel.addClicked(overviewToLevel0(state.info!, state.plan!, rasToArray(state.orientation, vol.shape, ras)));
+}
 window.addEventListener("resize", () => (measureViews(), render()));
+
+// ---- panels below the views -------------------------------------------------------
+
+let zoomPanel: ZoomPanel | null = null;
+let psfPanel: PsfPanel | null = null;
+let correlations: (number | null)[][] | null = null;
+
+function channelNames() {
+  return state.channels.map((c, i) => c.stain || state.info!.channels[i].name);
+}
+
+function startPanels() {
+  const ctx: AppContext = {
+    call: (body, progress) => call(body, progress),
+    info: state.info!,
+    plan: state.plan!,
+    channelNames,
+    redrawViews: () => render(),
+  };
+  zoomPanel = new ZoomPanel(ctx, $("zoom-panel"));
+  zoomPanel.suggest();
+  psfPanel = new PsfPanel(ctx, $("psf-panel"));
+  correlations = null;
+  showMetrics();
+  call<(number | null)[][]>({ type: "correlations" }).then((m) => ((correlations = m), showMetrics()));
+}
+
+function showMetrics() {
+  renderMetrics(
+    $("metrics-panel"),
+    channelNames(),
+    state.channels.map((c) => c.metrics),
+    correlations,
+  );
+}
+
+function markers(): Marker[] {
+  return [...(zoomPanel?.markers() ?? []), ...(psfPanel?.markers() ?? [])];
+}
 
 // ---- export -----------------------------------------------------------------------
 
@@ -410,6 +523,9 @@ $("export").onclick = () => {
       mirroredFromPreset: handedness(state.orientation) !== handedness(state.preset!.orientation),
     },
     qc: { rating, note: $<HTMLTextAreaElement>("note").value },
+    metrics: Object.fromEntries(state.channels.map((c, i) => [channelNames()[i], c.metrics])),
+    zooms: zoomPanel?.summary() ?? [],
+    resolution: psfPanel?.summary() ?? null,
     metadata: info.metadata,
     savedAt: new Date().toISOString(),
   };
