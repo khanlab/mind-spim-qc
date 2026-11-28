@@ -21,6 +21,7 @@ import { ZoomPanel } from "./panels/zooms";
 import { PsfPanel, SIDE_COLORS } from "./panels/psf";
 import { rasAxisMap } from "./orientation";
 import { renderMetrics } from "./panels/metrics";
+import { folderFromEntry, folderFromFileList, folderFromHandle, type Folder } from "./folders";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -36,55 +37,6 @@ function busy(message: string, fraction?: number) {
 const idle = () => ($("busy").hidden = true);
 
 // ---- folders: files read on request of the worker --------------------------------
-
-/** A dropped or chosen folder: reads files by relative path. */
-interface Folder {
-  name: string;
-  read(path: string): Promise<File | null>;
-}
-
-function folderFromEntry(dir: FileSystemDirectoryEntry): Folder {
-  return {
-    name: dir.name,
-    read: (path) =>
-      new Promise((resolve) =>
-        dir.getFile(
-          path,
-          {},
-          (entry) => (entry as FileSystemFileEntry).file(resolve, () => resolve(null)),
-          () => resolve(null),
-        ),
-      ),
-  };
-}
-
-function folderFromHandle(dir: FileSystemDirectoryHandle): Folder {
-  return {
-    name: dir.name,
-    async read(path) {
-      try {
-        const parts = path.split("/");
-        let d = dir;
-        for (const p of parts.slice(0, -1)) d = await d.getDirectoryHandle(p);
-        return await (await d.getFileHandle(parts[parts.length - 1])).getFile();
-      } catch {
-        return null;
-      }
-    },
-  };
-}
-
-/** From an <input webkitdirectory>, which lists every file up front. */
-function folderFromFileList(files: FileList): Folder {
-  const byPath = new Map<string, File>();
-  let name = "";
-  for (const f of Array.from(files)) {
-    const [root, ...rest] = f.webkitRelativePath.split("/");
-    name = root;
-    byPath.set(rest.join("/"), f);
-  }
-  return { name, read: async (path) => byPath.get(path) ?? null };
-}
 
 let folder: Folder | null = null;
 

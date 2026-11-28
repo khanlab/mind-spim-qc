@@ -14,7 +14,7 @@ import ZipFileStore from "@zarrita/storage/zip";
 import type { AsyncReadable } from "@zarrita/storage";
 import { ImsReader } from "./readers/ims";
 import { OmeZarrReader } from "./readers/omezarr";
-import { overviewToLevel0, type ImageReader, type ReadPlan, type Volume } from "./readers/types";
+import { overviewToLevel0, type Box, type ImageReader, type ReadPlan, type Volume } from "./readers/types";
 import { arrayMips, autoWindow, type Mips } from "./views";
 import { analyseChannel, chooseSites, readZoom, type ChannelAnalysis, type ChannelMetrics, type Site, type Zoom } from "./analysis/channel";
 import { logCorrelation } from "./analysis/metrics";
@@ -31,6 +31,7 @@ export type Request =
   | { id: number; type: "zoom"; level0: Shape; channel: number }
   | { id: number; type: "psf-plan"; channel: number; points: number; sides: 1 | 2 | null }
   | { id: number; type: "psf"; channel: number; points: number; sides: 1 | 2 | null }
+  | { id: number; type: "box"; box: Box; channel: number }
   | { id: number; type: "cancel" };
 
 export interface PsfPlan {
@@ -178,6 +179,11 @@ self.onmessage = async (e: MessageEvent<Request | FetchReply>) => {
         ),
       );
       reply(m);
+    } else if (msg.type === "box") {
+      // a block at one level, for the landmark page (needs no overview)
+      if (!reader) throw new Error("No image open");
+      const vol = await reader.readBox(msg.box, msg.channel);
+      reply(vol, [vol.data.buffer as ArrayBuffer]);
     } else if (msg.type === "sites") {
       reply(chooseSites(analyses[msg.channel], need(), msg.bright, msg.dim));
     } else if (msg.type === "zoom") {
