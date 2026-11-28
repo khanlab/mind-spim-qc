@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SPIM QC</title>
     <link rel="stylesheet" href="./src/style.css" />
+    <link rel="stylesheet" href="./src/landmarks/landmarks.css" />
   </head>
   <body>
     <header>
@@ -16,6 +17,7 @@
 
     <section id="drop" class="drop">
       <p>Drop an image here: an Imaris <code>.ims</code> file, an OME-Zarr folder or an <code>.ozx</code> file</p>
+      <p class="hint">To annotate landmarks, also load a landmark protocol (<code>.json</code>) once the image is open.</p>
       <div class="choose">
         <label class="button">Choose file<input id="file-input" type="file" accept=".ims,.ozx,.zip" hidden /></label>
         <button id="folder-button">Choose OME-Zarr folder</button>
@@ -31,6 +33,15 @@
         <progress id="busy-bar" max="1"></progress>
       </div>
     </div>
+
+    <nav id="stepbar" class="stepbar" hidden>
+      <button data-step="check" class="step">1 · Check and orientation</button>
+      <button data-step="align" class="step">2 · Align template</button>
+      <button data-step="annotate" class="step" hidden>3 · Annotate</button>
+      <span class="spacer"></span>
+      <span id="protocol-label" class="hint"></span>
+      <label class="button secondary" title="a landmark protocol (.json) unlocks annotation">Load protocol<input id="protocol-input" type="file" accept=".json" hidden /></label>
+    </nav>
 
     <main id="app" hidden>
       <aside>
@@ -62,7 +73,7 @@
         <p id="handedness" class="warning" hidden></p>
         <label class="check"><input id="confirmed" type="checkbox" /> I checked the orientation</label>
         <p id="orientation-note" class="hint"></p>
-        <a id="next-step" class="button" href="./landmarks.html" target="_blank" rel="noopener" hidden>Next: align the template and place landmarks →</a>
+        <button id="next-step" hidden>Next: align the template →</button>
 
         <h3>Rating</h3>
         <div class="rating">
@@ -93,6 +104,106 @@
         <div id="psf-panel"></div>
       </section>
     </main>
+    <section id="align" class="align" hidden>
+      <h2>Align the template</h2>
+      <p class="hint">An affine alignment of the template (ABAv3) to this image. For landmarks it only starts each view near its place: a few hundred µm off is fine.
+        Magenta: template edges; yellow: template brain outline. Click a view to move the slices.</p>
+      <p id="align-warning" class="warning"></p>
+      <p id="align-status" class="status"></p>
+      <div class="align-layout">
+        <div id="align-views" class="lm-views"></div>
+        <div class="align-side">
+          <label class="align-row"><span>Channel</span><select id="align-channel"></select></label>
+          <p class="hint">Align on a channel that shows the anatomy (nuclear stain or autofluorescence), not a sparse stain.
+            Left–right cannot be judged from the fit: a mirrored orientation (e.g. LAI for RAI) fits almost as well, so take the orientation from the acquisition.</p>
+          <div id="align-controls"></div>
+          <p id="align-info" class="hint"></p>
+          <div class="align-buttons">
+            <button id="align-auto" class="secondary">Automatic</button>
+            <button id="align-refine" class="secondary" title="run the automatic search again, starting from the current alignment">Refine from here</button>
+            <button id="align-save" class="secondary">Save alignment</button>
+            <button id="align-accept">Accept</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="annotate" hidden>
+      <section id="annotate-start" class="drop wide">
+        <h2 id="annotate-protocol"></h2>
+        <dl class="loaded">
+          <dt>Orientation</dt><dd id="annotate-orientation"></dd>
+          <dt>Alignment</dt><dd id="annotate-alignment"></dd>
+        </dl>
+        <div class="rater-row">
+          <label>Rater <input id="rater" placeholder="initials" maxlength="20" /></label>
+          <label>Session <input id="session" value="1" maxlength="10" class="narrow" /></label>
+          <button id="start" disabled>Start</button>
+        </div>
+        <p id="annotate-status" class="status"></p>
+      </section>
+    <main id="annotate-app" hidden>
+      <aside>
+        <h2 id="lm-file-name"></h2>
+        <p class="hint" id="session-info"></p>
+        <p id="progress"></p>
+        <label>Show <select id="group-filter"></select></label>
+        <ol id="list" class="lm-list"></ol>
+        <button id="export-tsv" title="landmarks .tsv and its .json sidecar, for a derivatives dataset">Save placements (TSV)</button>
+        <button id="export-slicer" class="secondary" title=".fcsv and .mrk.json in RAS mm">Save for 3D Slicer</button>
+        <button id="export-json" class="secondary" title="everything, to resume elsewhere">Save session (JSON)</button>
+        <button id="realign" class="secondary" title="for template protocols">Re-align template</button>
+        <label class="button secondary">Load session (JSON)<input id="import-json" type="file" accept=".json" hidden /></label>
+        <p class="hint">Placements are also kept in this browser and come back when you open the same protocol, image, rater and session.</p>
+      </aside>
+
+      <section class="lm-main">
+        <div class="lm-head">
+          <h2 id="lm-title"></h2>
+          <span id="lm-group" class="tag"></span>
+          <span id="lm-state" class="lm-state"></span>
+        </div>
+        <div class="lm-info">
+          <p id="lm-def"></p>
+          <figure id="lm-ref-fig"><img id="lm-ref" alt="template reference" /><figcaption>template (2 mm; coronal, sagittal, axial as the views)</figcaption></figure>
+        </div>
+        <div class="lm-clicks" id="lm-clicks"></div>
+        <div class="lm-controls">
+          <label>Field <select id="fov">
+            <option value="400">0.4 mm</option>
+            <option value="800" selected>0.8 mm</option>
+            <option value="1600">1.6 mm</option>
+            <option value="3200">3.2 mm</option>
+            <option value="6400">6.4 mm</option>
+          </select></label>
+          <label>Slab <input id="slab" type="number" min="0" max="200" step="2" class="narrow" /> µm</label>
+          <label>Smooth <input id="smooth" type="number" min="0" max="50" step="1" class="narrow" /> µm</label>
+          <label>Contrast <input id="contrast" type="range" min="90" max="100" step="0.1" value="99.7" /></label>
+          <label id="depth-label"><span id="depth-name">Depth</span> <input id="depth" type="range" step="2" /> <span id="depth-value"></span></label>
+          <label id="tilt-label">Tilt <input id="tilt-u" type="range" min="-30" max="30" step="1" value="0" title="about the vertical axis" />
+            <input id="tilt-v" type="range" min="-30" max="30" step="1" value="0" title="about the horizontal axis" /> <span id="tilt-value"></span></label>
+          <label class="check"><input id="show-init" type="checkbox" /> show start position</label>
+        </div>
+        <div id="lm-views" class="lm-views"></div>
+        <div class="lm-actions">
+          <button id="place" title="Space">Place here</button>
+          <button id="absent" class="secondary" title="A">Absent</button>
+          <button id="damaged" class="secondary" title="D">Damaged</button>
+          <button id="skip" class="secondary">Skip</button>
+          <button id="clear" class="secondary">Clear</button>
+          <span class="spacer"></span>
+          <button id="reset-view" class="secondary" title="R: back to the landmark's start: position, field, depth and tilt (placements are kept)">Reset view</button>
+          <button id="recenter" class="secondary" title="C">Centre on cursor</button>
+          <button id="prev" class="secondary" title="P">◀ Previous</button>
+          <button id="next" title="N">Next ▶</button>
+        </div>
+        <textarea id="lm-note" rows="2" placeholder="Note on this landmark"></textarea>
+        <p id="lm-status" class="hint"></p>
+        <p class="hint keys">Click a view to move the cursor; wheel moves through slices (shift: faster); double-click centres the view.
+          Keys: Space place · A absent · D damaged · C centre · R reset view · N/P next/previous · +/− field.</p>
+      </section>
+    </main>
+    </section>
     <script type="module" src="./src/main.ts"></script>
   </body>
 </html>

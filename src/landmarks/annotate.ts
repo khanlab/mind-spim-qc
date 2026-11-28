@@ -1,25 +1,25 @@
 /**
- * Landmark placement page: opens a protocol (from spimquant-fiducials
- * make_protocol.py) and its image, and lets a rater place each landmark at full
- * resolution. Blocks of the image are read at the level the field of view needs
- * and resampled on the views' planes here.
+ * Step 3 of the page: landmark annotation. A protocol (from spimquant-fiducials)
+ * unlocks it; the image is the one open on the page, its orientation the one
+ * confirmed in step 1 and, for template protocols, its placement the alignment
+ * accepted in step 2. Blocks of the image are read at the level the field of
+ * view needs and resampled on the views' planes here.
  */
-import { folderFromEntry, folderFromFileList, folderFromHandle, type Folder } from "../folders";
+import { app, on, setStep } from "../app";
+import { call } from "../client";
 import { isValid } from "../orientation";
-import type { Box, ImageInfo, Volume } from "../readers/types";
+import type { Box, Volume } from "../readers/types";
 import { VIEWS, VIEW_LABELS, type ViewName } from "../views";
-import type { FetchReply, Notice, Request, Source } from "../worker";
 import {
   add, blurNaN, boxForBounds, boxVoxels, chooseBlock, samplingBounds, dot, l0ToPhys, levelVoxel, normalize, orthoPlane, physToL0, physToPixel,
   pixelToPhys, rasAxis, sampleInto, scale, sub, tiles, voxel0, windowOf,
   type Block, type Plane, type Roi, type Sampling, type V3,
 } from "./geometry";
 import { apply } from "../registration/affine";
-import { getRecord, updateRecord } from "../imagestore";
-import { idx0ToWorld, runAlignment, tplVecToPhys, type Alignment } from "./alignment";
+import { idx0ToWorld, tplVecToPhys, type Alignment } from "./frames";
 import {
   derivativePrefix, emptyPlacement, fcsvText, instantiate, isDone, markupsJson, parseProtocol, sessionTsv, sidecar, storageKey, worldPoints,
-  type Landmark, type Placement, type Protocol, type Session, type Status,
+  type Placement, type Protocol, type Session, type Status,
 } from "./protocol";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -29,56 +29,18 @@ const OBLIQUE_BUDGET = 110e6;
 /** starting field of view per group (um), before the rater changes it */
 const DEFAULT_FOV: Record<string, number> = { point3d: 1600, barrel: 1200, hippo: 1200, border: 1600, probe: 1600 };
 
-// ---- worker ---------------------------------------------------------------------
-
-const worker = new Worker(new URL("../worker.ts", import.meta.url), { type: "module" });
-let nextId = 0;
-const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
-let folder: Folder | null = null;
-
-worker.onmessage = async (e) => {
-  const msg = e.data as Notice | { id: number; result?: any; error?: string };
-  if ("type" in msg && msg.type === "progress") return;
-  if ("type" in msg && msg.type === "fetch") {
-    const file = folder ? await folder.read(msg.key) : null;
-    const bytes = file ? await file.arrayBuffer() : null;
-    const reply: FetchReply = { type: "fetched", fetchId: msg.fetchId, bytes };
-    worker.postMessage(reply, bytes ? [bytes] : []);
-    return;
-  }
-  const { id, result, error } = msg as { id: number; result?: any; error?: string };
-  const p = pending.get(id);
-  pending.delete(id);
-  if (error) p?.reject(new Error(error));
-  else p?.resolve(result);
-};
-
-type Body = Request extends infer R ? (R extends any ? Omit<R, "id"> : never) : never;
-function call<T>(body: Body): Promise<T> {
-  const id = nextId++;
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    worker.postMessage({ ...body, id });
-  });
-}
-
 // ---- state ----------------------------------------------------------------------
 
+/** the protocol as loaded */
+let loaded: Protocol | null = null;
+let loadedName = "";
+/** the protocol in use, with positions in this image */
 let proto: Protocol | null = null;
-/** the template protocol as loaded, when the page places it by an alignment */
-let templateProto: Protocol | null = null;
 let alignment: Alignment | null = null;
-const TEMPLATES: Record<string, { anat: string; mask: string }> = {
-  ABAv3: {
-    anat: new URL("templates/ABAv3/tpl-ABAv3_res-100um_anat.nii.gz", location.href).href,
-    mask: new URL("templates/ABAv3/tpl-ABAv3_res-100um_desc-brain_mask.nii.gz", location.href).href,
-  },
-};
-const alignKey = (tpl: string, image: string) => `align:${tpl}:${image}`;
-let source: Source | null = null;
 let sourceName = "";
-let info: ImageInfo | null = null;
+let info: typeof app.info = null;
 let session: Session | null = null;
+let running = false;
 let current = 0;
 /** landmark indices shown in the list (group filter) */
 let shown: number[] = [];
@@ -99,6 +61,7 @@ let lastSampling: Map<HTMLCanvasElement, Sampling> = new Map();
 /** the unsmoothed samples last drawn on each canvas (for the layer-4 suggestion) */
 let lastImage: Map<HTMLCanvasElement, Float32Array> = new Map();
 let timerStart = 0;
+let ticking = false;
 
 const lm = () => proto!.landmarks[current];
 const placement = (): Placement => {
@@ -107,165 +70,116 @@ const placement = (): Placement => {
   return session!.placements[id];
 };
 
-function busy(message: string) {
-  $("busy").hidden = false;
-  $("busy-message").textContent = message;
-}
-const idle = () => ($("busy").hidden = true);
 function status(text: string, error = false) {
-  $("status").textContent = text;
-  $("status").classList.toggle("error", error);
+  $("annotate-status").textContent = text;
+  $("annotate-status").classList.toggle("error", error);
 }
 
-// ---- loading --------------------------------------------------------------------
-
-async function setProtocolFile(f: File) {
-  try {
-    proto = parseProtocol(await f.text());
-    $("protocol-name").textContent = `${f.name} – ${proto.landmarks.length} landmarks for ${proto.image.name}`;
-    status("");
-  } catch (e) {
-    proto = null;
-    $("protocol-name").textContent = "–";
-    status(`Protocol: ${(e as Error).message}`, true);
-  }
-  updateStart();
-}
-
-function setImage(s: Source, name: string) {
-  source = s;
-  sourceName = name;
-  $("image-name").textContent = name;
-  updateStart();
-}
-
-/** Fills the steps from what is known about the image (QC page, earlier sessions). */
-function prefill() {
-  if (!sourceName) return;
-  const rec = getRecord(sourceName);
-  const input = $<HTMLInputElement>("orientation");
-  const note = $("orient-note");
-  if (rec?.orientation && !input.value) input.value = rec.orientation;
-  if (rec?.orientation)
-    note.textContent = rec.orientationConfirmed
-      ? `confirmed on the QC page (${(rec.orientationUpdated ?? "").slice(0, 10)})`
-      : "from the QC page, not confirmed there";
-  const tname = proto?.template ?? "ABAv3";
-  const al = (rec?.alignments?.[tname] ?? null) as Alignment | null;
-  $("align-note").textContent = proto && proto.space !== "template" ? "not needed: this protocol has positions for one image"
-    : al ? `saved alignment from ${al.created.slice(0, 10)} (${al.method}${al.nudges.length ? ` + ${al.nudges.length} nudges` : ""}) will open for checking`
-    : "will run after Start";
-  if (al?.channel !== undefined && !$<HTMLInputElement>("channel").value) $<HTMLInputElement>("channel").value = String(al.channel);
-}
-
-function updateStart() {
-  prefill();
-  const ok = !!proto && !!source && $<HTMLInputElement>("rater").value.trim().length > 0;
-  $<HTMLButtonElement>("start").disabled = !ok;
-  if (proto && source && sourceName !== proto.image.name)
-    status(`Note: the protocol was made for ${proto.image.name}, not ${sourceName}.`, true);
-}
+// ---- protocol and start panel ---------------------------------------------------------
 
 $("protocol-input").addEventListener("change", (e) => {
   const f = (e.target as HTMLInputElement).files?.[0];
-  if (f) void setProtocolFile(f);
-});
-$("file-input").addEventListener("change", (e) => {
-  const f = (e.target as HTMLInputElement).files?.[0];
-  if (f) setImage({ kind: "file", file: f }, f.name);
-});
-$("folder-button").addEventListener("click", async () => {
-  const picker = (window as any).showDirectoryPicker;
-  if (picker) {
-    try {
-      const h = await picker();
-      folder = folderFromHandle(h);
-      setImage({ kind: "folder", name: h.name }, h.name);
-    } catch {
-      /* cancelled */
-    }
-  } else $("folder-input").click();
-});
-$("folder-input").addEventListener("change", (e) => {
-  const files = (e.target as HTMLInputElement).files;
-  if (!files?.length) return;
-  folder = folderFromFileList(files);
-  setImage({ kind: "folder", name: folder.name }, folder.name);
-});
-$("rater").addEventListener("input", updateStart);
-
-const drop = $("drop");
-drop.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  drop.classList.add("over");
-});
-drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-drop.addEventListener("drop", async (e) => {
-  e.preventDefault();
-  drop.classList.remove("over");
-  for (const item of Array.from(e.dataTransfer?.items ?? [])) {
-    const entry = item.webkitGetAsEntry?.();
-    if (entry?.isDirectory) {
-      folder = folderFromEntry(entry as FileSystemDirectoryEntry);
-      setImage({ kind: "folder", name: entry.name }, entry.name);
-      continue;
-    }
-    const f = item.getAsFile();
-    if (!f) continue;
-    if (f.name.toLowerCase().endsWith(".json")) await setProtocolFile(f);
-    else setImage({ kind: "file", file: f }, f.name);
-  }
+  (e.target as HTMLInputElement).value = "";
+  if (f) void loadProtocolFile(f);
 });
 
-$("start").addEventListener("click", start);
-
-async function start() {
-  if (!proto || !source) return;
-  const rater = $<HTMLInputElement>("rater").value.trim();
-  const ses = $<HTMLInputElement>("session").value.trim() || "1";
-  busy(`Opening ${sourceName}…`);
+/** Loads a landmark protocol: unlocks step 3 and goes there. */
+export async function loadProtocolFile(f: File) {
   try {
-    const r = await call<{ info: ImageInfo }>({ type: "open", source });
-    info = r.info;
-  } catch (e) {
-    idle();
-    status(`Cannot open the image: ${(e as Error).message}`, true);
+    loaded = parseProtocol(await f.text());
+    loadedName = f.name;
+  } catch (err) {
+    alert(`Not a landmark protocol: ${(err as Error).message}`);
     return;
   }
-  idle();
+  if (running) stopAnnotation();
+  $("protocol-label").textContent = `${loadedName} (${loaded.landmarks.length} landmarks)`;
+  (document.querySelector('#stepbar [data-step="annotate"]') as HTMLElement).hidden = false;
+  if (app.info) setStep("annotate");
+}
+
+/** The start panel: what the protocol needs from steps 1 and 2. */
+function showStart() {
+  if (!loaded) return;
+  $("annotate-start").hidden = running;
+  $("annotate-app").hidden = !running;
+  if (running) return;
+  const tplSpace = loaded.space === "template";
+  $("annotate-protocol").textContent = `${loadedName}: ${loaded.landmarks.length} landmarks` +
+    (tplSpace ? ` on template ${loaded.template ?? "ABAv3"}` : ` for ${loaded.image.name}`);
+  $("annotate-orientation").textContent = tplSpace
+    ? `${app.orientation}${app.orientationConfirmed ? " (confirmed in step 1)" : " — not confirmed yet: check it in step 1"}`
+    : `${loaded.image.orientation} (from the protocol)`;
+  const al = tplSpace ? app.alignments[loaded.template ?? "ABAv3"] : null;
+  $("annotate-alignment").textContent = !tplSpace ? "not needed: the protocol has positions in this image"
+    : al ? `accepted ${al.created.slice(0, 10)} (${al.method}${al.nudges.length ? ` + ${al.nudges.length} nudges` : ""}, channel ${al.channel ?? 0})`
+    : "none yet: align the template in step 2";
+  const problems: string[] = [];
+  if (!app.info) problems.push("open an image first");
+  if (tplSpace && !al) problems.push("align the template in step 2");
+  if (!tplSpace && loaded.image.name && app.name !== loaded.image.name) problems.push(`note: the protocol was made for ${loaded.image.name}`);
+  status(problems.join("; "), problems.some((p) => !p.startsWith("note")));
+  updateStart();
+}
+
+function updateStart() {
+  const tplSpace = loaded?.space === "template";
+  const ok = !!loaded && !!app.info && $<HTMLInputElement>("rater").value.trim().length > 0 &&
+    (!tplSpace || !!app.alignments[loaded.template ?? "ABAv3"]);
+  $<HTMLButtonElement>("start").disabled = !ok;
+}
+$("rater").addEventListener("input", updateStart);
+$("start").addEventListener("click", start);
+
+on("step", () => {
+  if (app.step === "annotate") showStart();
+});
+on("orientation", () => {
+  if (app.step === "annotate") showStart();
+});
+on("image", () => {
+  if (running) stopAnnotation();
+  if (app.step === "annotate") showStart();
+});
+on("alignment", () => {
+  // a new alignment moves the landmarks of a running template protocol
+  if (!running || !loaded || loaded.space !== "template" || !info) return;
+  const al = app.alignments[loaded.template ?? "ABAv3"];
+  if (!al) return;
+  save();
+  alignment = al;
+  proto = placeTemplate(loaded, al, proto!.image.channel);
+  session!.alignment = al;
+  save();
+  openLandmark(current);
+});
+
+function stopAnnotation() {
+  if (session) save();
+  running = false;
+  proto = null;
+  session = null;
+  vs = null;
+  tilesRead = [];
+  showStart();
+}
+
+function start() {
+  if (!loaded || !app.info) return;
+  info = app.info;
+  sourceName = app.name;
+  const rater = $<HTMLInputElement>("rater").value.trim();
+  const ses = $<HTMLInputElement>("session").value.trim() || "1";
   const warnings: string[] = [];
-  if (getRecord(sourceName) && !getRecord(sourceName, info.levels[0].shape))
-    warnings.push("a saved record for this file name is for an image of another size and was ignored");
-  if (proto.space === "template") {
-    templateProto = proto;
-    const channel = Number($<HTMLInputElement>("channel").value || 0);
-    const orientation = ($<HTMLInputElement>("orientation").value.trim() || info.orientation || "").toUpperCase();
-    if (!isValid(orientation)) {
-      status("Enter the image orientation (e.g. RAI): the file does not store one. The QC page helps to find it.", true);
-      return;
-    }
-    if (channel >= info.channels.length) {
-      status(`Channel ${channel} does not exist: the image has ${info.channels.length}.`, true);
-      return;
-    }
-    const tname = proto.template ?? "ABAv3";
-    const urls = TEMPLATES[tname];
-    if (!urls) {
-      status(`No template ${tname} on this site.`, true);
-      return;
-    }
-    const recAl = getRecord(sourceName, info.levels[0].shape)?.alignments?.[tname] as Alignment | undefined;
-    const savedText = localStorage.getItem(alignKey(tname, sourceName));
-    const savedAl = recAl ?? (savedText ? (JSON.parse(savedText) as Alignment) : null);
-    // a saved alignment brings its channel unless one was chosen
-    const ch = savedAl?.channel !== undefined && !$<HTMLInputElement>("channel").value ? savedAl.channel : channel;
-    $("drop").hidden = true;
-    alignment = await runAlignment({
-      info, channel: ch, imageName: sourceName, orientation, call,
-      template: { name: tname, ...urls }, saved: savedAl && savedAl.orientation === orientation ? savedAl : null,
-    });
-    saveAlignment(alignment);
-    proto = placeTemplate(templateProto, alignment, alignment.channel ?? channel);
+  if (loaded.space === "template") {
+    const al = app.alignments[loaded.template ?? "ABAv3"];
+    if (!al) return showStart();
+    alignment = al;
+    proto = placeTemplate(loaded, al, al.channel ?? 0);
+  } else {
+    alignment = null;
+    proto = loaded;
+    if (!isValid(proto.image.orientation)) warnings.push(`orientation "${proto.image.orientation}" is not valid; views use RAS`);
   }
   if (proto.image.channel >= info.channels.length) {
     status(`The protocol uses channel ${proto.image.channel}, the image has ${info.channels.length}.`, true);
@@ -275,19 +189,18 @@ async function start() {
   const pv = proto.image.voxel_size0_um_xyz;
   if (pv && pv.some((v, i) => Math.abs(v - v0[i]) > 0.01 * v))
     warnings.push(`voxel size ${v0.map((v) => v.toFixed(3)).join("×")} µm differs from the protocol's ${pv.join("×")} µm`);
-  if (!isValid(proto.image.orientation)) warnings.push(`orientation "${proto.image.orientation}" is not valid; views use RAS`);
   const key = storageKey(proto, rater, ses);
   const saved = localStorage.getItem(key);
   session = saved
     ? (JSON.parse(saved) as Session)
     : { protocol: proto.protocol, image: sourceName, rater, session: ses, started: new Date().toISOString(), placements: {} };
   if (alignment) session.alignment = alignment;
-  $("drop").hidden = true;
-  $("app").hidden = false;
-  $("realign").hidden = !templateProto;
-  $("file-name").textContent = sourceName;
+  running = true;
+  showStart();
+  $("realign").hidden = loaded.space !== "template";
+  $("lm-file-name").textContent = sourceName;
   $("session-info").textContent =
-    `Rater ${rater}, session ${ses}. Channel ${proto.image.channel}${proto.image.channel_name ? ` (${proto.image.channel_name})` : ""}, orientation ${proto.image.orientation}.` +
+    `Rater ${rater}, session ${ses}. Channel ${proto.image.channel}${proto.image.channel_name && !/^Channel \d+$/.test(proto.image.channel_name) ? ` (${proto.image.channel_name})` : ""}, orientation ${proto.image.orientation}.` +
     (warnings.length ? ` Warning: ${warnings.join("; ")}.` : "") +
     (saved ? " Resumed from this browser." : "");
   const groups = [...new Set(proto.landmarks.map((l) => l.group))];
@@ -298,12 +211,10 @@ async function start() {
   applyFilter();
   const firstTodo = proto.landmarks.findIndex((l) => !isDone(l, session!.placements[l.id]));
   openLandmark(firstTodo >= 0 ? firstTodo : 0);
-  setInterval(tick, 1000);
-}
-
-function saveAlignment(al: Alignment) {
-  const rec = getRecord(sourceName, info!.levels[0].shape);
-  updateRecord(sourceName, { shape0: info!.levels[0].shape, alignments: { ...(rec?.alignments ?? {}), [al.template]: al } });
+  if (!ticking) {
+    setInterval(tick, 1000);
+    ticking = true;
+  }
 }
 
 function placeTemplate(tp: Protocol, al: Alignment, channel: number): Protocol {
@@ -313,20 +224,9 @@ function placeTemplate(tp: Protocol, al: Alignment, channel: number): Protocol {
   });
 }
 
-$("realign").addEventListener("click", async () => {
-  if (!templateProto || !alignment || !info) return;
+$("realign").addEventListener("click", () => {
   save();
-  $("app").hidden = true;
-  alignment = await runAlignment({
-    info, channel: proto!.image.channel, imageName: sourceName, orientation: alignment.orientation, call,
-    template: { name: alignment.template, ...TEMPLATES[alignment.template] }, saved: alignment,
-  });
-  saveAlignment(alignment);
-  proto = placeTemplate(templateProto, alignment, alignment.channel ?? proto!.image.channel);
-  session!.alignment = alignment;
-  save();
-  $("app").hidden = false;
-  openLandmark(current);
+  setStep("align");
 });
 
 // ---- persistence ------------------------------------------------------------------
@@ -338,7 +238,7 @@ function save() {
 }
 
 function tick() {
-  if (!session || document.visibilityState !== "visible" || !timerStart) return;
+  if (!session || !running || app.step !== "annotate" || document.visibilityState !== "visible" || !timerStart) return;
   const p = placement();
   p.seconds += 1;
   if (p.seconds % 10 === 0) save();
@@ -693,7 +593,7 @@ $("depth").addEventListener("input", () => {
 $("show-init").addEventListener("change", () => draw());
 
 document.addEventListener("keydown", (e) => {
-  if (!vs || $("app").hidden) return;
+  if (!vs || !running || app.step !== "annotate") return;
   const t = e.target as HTMLElement;
   if (t.tagName === "TEXTAREA" || (t.tagName === "INPUT" && (t as HTMLInputElement).type !== "checkbox" && (t as HTMLInputElement).type !== "range")) return;
   const k = e.key.toLowerCase();
@@ -887,6 +787,7 @@ interface Tile {
   roi?: Roi;
 }
 let tilesRead: Tile[] = [];
+void tilesRead;
 
 /** What to read: boxes with a margin (so small moves need no new read), and the tight boxes the views need now. */
 interface PlanItem {

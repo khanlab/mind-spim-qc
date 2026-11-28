@@ -7,6 +7,9 @@
  * Subject world (mm, RAS) = R (i0 * v0): the orientation's axis directions R,
  * level-0 voxel index i0, level-0 voxel size v0; origin at voxel 0.
  */
+import { app, anatomyChannel, emit, on, setStep } from "../app";
+import { call } from "../client";
+import { getRecord, updateRecord } from "../imagestore";
 import { isValid } from "../orientation";
 import type { Box, ImageInfo, Volume } from "../readers/types";
 import { apply, applyVec, inv, mul, sample, type Grid, type M4, type RegResult } from "../registration/affine";
@@ -17,42 +20,8 @@ import {
   type Block, type Sampling, type V3,
 } from "./geometry";
 
-export interface Alignment {
-  template: string;
-  image: string;
-  orientation: string;
-  voxel0_um_xyz: V3;
-  /** template world (mm) -> subject world (mm, see above), row-major 4x4 */
-  tpl2world: M4;
-  /** template world (mm) -> level-0 voxel index (x, y, z) */
-  tpl2idx0: M4;
-  /** image channel shown and aligned */
-  channel?: number;
-  method: string;
-  nudges: string[];
-  overlap?: number;
-  created: string;
-}
-
-/** level-0 voxel index -> subject world (mm) */
-export function idx0ToWorld(orientation: string, v0um: V3): M4 {
-  const o = isValid(orientation) ? orientation : "RAS";
-  // world_k = sum_a d_a[k] i0_a v0_a: column a is the RAS direction of image axis a
-  const cols = [0, 1, 2].map((k) => rasAxis(o, k)); // cols[k][a] = d_a[k]
-  const m = new Array(16).fill(0);
-  for (let k = 0; k < 3; k++) for (let a = 0; a < 3; a++) m[4 * k + a] = (cols[k][a] * v0um[a]) / 1000;
-  m[15] = 1;
-  return m;
-}
-
-/** A template-space direction as a unit vector in the image's physical frame (um axes). */
-export function tplVecToPhys(al: Alignment, v: number[]): V3 {
-  const w = applyVec(al.tpl2world, v); // world mm direction
-  const o = isValid(al.orientation) ? al.orientation : "RAS";
-  // physical = R^T world (R is a signed permutation)
-  const p = [0, 1, 2].map((a) => [0, 1, 2].reduce((s, k) => s + rasAxis(o, k)[a] * w[k], 0)) as V3;
-  return normalize(p);
-}
+export { idx0ToWorld, tplVecToPhys, type Alignment } from "./frames";
+import { idx0ToWorld, type Alignment } from "./frames";
 
 export interface AlignContext {
   info: ImageInfo;
@@ -67,17 +36,13 @@ export interface AlignContext {
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const PX = 340;
 
-/** Shows the alignment step; resolves with the accepted alignment. */
-export function runAlignment(ctx: AlignContext): Promise<Alignment> {
-  return new Promise((resolve, reject) => {
-    void start(ctx, resolve).catch(reject);
-  });
+/** Builds the alignment step for an image; `done` is called on every accept. */
+export function runAlignment(ctx: AlignContext, done: (a: Alignment) => void): Promise<void> {
+  return start(ctx, done);
 }
 
 async function start(ctx: AlignContext, done: (a: Alignment) => void) {
   const { info } = ctx;
-  const host = $("align");
-  host.hidden = false;
   const status = (t: string) => ($("align-status").textContent = t);
   status("Reading an overview of the image and loading the template…");
   const v0 = voxel0(info);
@@ -302,7 +267,6 @@ async function start(ctx: AlignContext, done: (a: Alignment) => void) {
   $("align-auto").onclick = () => void runAuto();
   $("align-refine").onclick = () => void runAuto(T);
   $("align-accept").onclick = () => {
-    host.hidden = true;
     done({
       template: ctx.template.name, image: ctx.imageName, orientation: o, voxel0_um_xyz: v0,
       tpl2world: T, tpl2idx0: mul(inv(toWorld), T), channel, method, nudges, overlap, created: new Date().toISOString(),
@@ -324,3 +288,59 @@ async function start(ctx: AlignContext, done: (a: Alignment) => void) {
 }
 
 const add3 = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+
+// ---- the step -------------------------------------------------------------------------
+
+
+export const TEMPLATES: Record<string, { anat: string; mask: string }> = {
+  ABAv3: {
+    anat: new URL("templates/ABAv3/tpl-ABAv3_res-100um_anat.nii.gz", location.href).href,
+    mask: new URL("templates/ABAv3/tpl-ABAv3_res-100um_desc-brain_mask.nii.gz", location.href).href,
+  },
+};
+export const DEFAULT_TEMPLATE = "ABAv3";
+
+/** what the step was built for: image and orientation */
+let builtFor = "";
+
+/** Alignments saved for this image in earlier sessions (same orientation only). */
+export function restoreAlignments() {
+  app.alignments = {};
+  if (!app.info) return;
+  const rec = getRecord(app.name, app.info.levels[0].shape);
+  for (const [t, a] of Object.entries(rec?.alignments ?? {})) {
+    const al = a as Alignment;
+    if (al.orientation === app.orientation) app.alignments[t] = al;
+  }
+}
+
+on("image", () => {
+  builtFor = "";
+  restoreAlignments();
+});
+on("orientation", () => {
+  // the subject world frame changes with the orientation: a new start
+  if (builtFor && !builtFor.endsWith(`:${app.orientation}`)) builtFor = "";
+  restoreAlignments();
+});
+on("step", () => {
+  if (app.step !== "align" || !app.info) return;
+  const want = `${app.name}:${app.orientation}`;
+  $("align-warning").textContent = app.orientationConfirmed ? "" :
+    "The orientation is not confirmed yet (step 1). A mirrored orientation aligns almost as well, so confirm it first.";
+  if (builtFor === want) return;
+  builtFor = want;
+  const t = DEFAULT_TEMPLATE;
+  const saved = app.alignments[t] ?? null;
+  void runAlignment({
+    info: app.info, channel: saved?.channel ?? anatomyChannel(), imageName: app.name, orientation: app.orientation,
+    template: { name: t, ...TEMPLATES[t] }, call: call as AlignContext["call"], saved,
+  }, (al) => {
+    app.alignments[al.template] = al;
+    const rec = getRecord(app.name, app.info!.levels[0].shape);
+    updateRecord(app.name, { shape0: app.info!.levels[0].shape, alignments: { ...(rec?.alignments ?? {}), [al.template]: al } });
+    emit("alignment");
+    const annotate = document.querySelector('#stepbar [data-step="annotate"]') as HTMLElement;
+    setStep(annotate.hidden ? "check" : "annotate");
+  });
+});

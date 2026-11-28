@@ -44,3 +44,8 @@ input.narrow { width: 4em; }
 .align-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
 .steps { text-align: left; margin: 14px auto; width: max-content; max-width: 100%; padding-left: 1.4em; display: flex; flex-direction: column; gap: 8px; }
 .steps .hint { margin-left: 6px; }
+.stepbar { display: flex; gap: 6px; align-items: center; padding: 6px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.stepbar .step { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.stepbar .step.current { background: var(--accent); color: #fff; border-color: var(--accent); }
+.stepbar .spacer { flex: 1; }
+#annotate-start h2 { margin-bottom: 4px; }

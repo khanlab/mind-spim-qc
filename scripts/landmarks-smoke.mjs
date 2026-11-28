@@ -1,101 +1,91 @@
-// End-to-end check of the landmark page in headless Chromium: open a protocol and
-// its image, place a 3D point, a barrel and a three-click probe, export the TSV.
-//   node scripts/landmarks-smoke.mjs http://localhost:4173/landmarks.html protocol.json image.ims outdir
-import { mkdirSync, writeFileSync } from "node:fs";
+// The steps on one page, in headless Chromium:
+//   1 open the image, confirm the orientation
+//   2 align the template (automatic), accept
+//   load a template protocol -> 3 annotate: start, place a point, export
+//   back to 2: nudge, accept -> landmarks re-placed; reset view; a subject protocol too
+//   node scripts/landmarks-smoke.mjs BASE_URL image.ims template_protocol.json [subject_protocol.json] outdir
+import { mkdirSync, readFileSync } from "node:fs";
 import { chromium } from "playwright-core";
-const [url, protocol, image, outdir] = process.argv.slice(2);
+const args = process.argv.slice(2);
+const [base, image, tplProtocol] = args;
+const outdir = args[args.length - 1];
+const subjProtocol = args.length > 4 ? args[3] : null;
 mkdirSync(outdir, { recursive: true });
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1700, height: 1150 }, deviceScaleFactor: 1, acceptDownloads: true });
+const page = await browser.newPage({ viewport: { width: 1700, height: 1100 }, deviceScaleFactor: 1, acceptDownloads: true });
 page.on("pageerror", (e) => console.log("pageerror:", e.message));
 page.on("console", (m) => m.type() === "error" && console.log("console:", m.text()));
-await page.goto(url);
-await page.setInputFiles("#protocol-input", protocol);
+const t0 = Date.now();
+const secs = () => `${((Date.now() - t0) / 1000).toFixed(1)} s`;
+
+// 1. check and orientation
+await page.goto(base + "/index.html");
 await page.setInputFiles("#file-input", image);
+await page.waitForSelector("#stepbar:not([hidden])", { timeout: 900000 });
+console.log(`[${secs()}] step 1: orientation ${await page.inputValue("#orientation")}`);
+if (!(await page.isChecked("#confirmed"))) await page.check("#confirmed");
+await page.click("#next-step");
+
+// 2. align
+const aligned = () =>
+  page.waitForFunction(() => /Done in|failed|saved alignment/i.test(document.getElementById("align-status").textContent ?? ""), null, { timeout: 600000 });
+await aligned();
+console.log(`[${secs()}] step 2: ${await page.textContent("#align-status")} | ${await page.textContent("#align-info")} | channel ${await page.inputValue("#align-channel")}`);
+await page.screenshot({ path: `${outdir}/02_align.png` });
+await page.click("#align-accept");
+console.log(`[${secs()}] after accept, step: ${await page.$eval("#stepbar .current", (b) => b.dataset.step)}`);
+
+// load a template protocol -> 3
+await page.setInputFiles("#protocol-input", tplProtocol);
+await page.waitForSelector("#annotate:not([hidden])");
+console.log(`[${secs()}] step 3: ${await page.textContent("#annotate-protocol")} | orientation: ${await page.textContent("#annotate-orientation")} | alignment: ${await page.textContent("#annotate-alignment")}`);
 await page.fill("#rater", "smoke");
-console.log("protocol:", await page.textContent("#protocol-name"));
 await page.click("#start");
-await page.waitForSelector("#app:not([hidden])", { timeout: 120000 });
-console.log("session:", await page.textContent("#session-info"));
-
-const waitRead = async (label) => {
-  const t0 = Date.now();
-  await page.waitForFunction(() => / read in /.test(document.getElementById("lm-status").textContent ?? ""), null, { timeout: 300000 });
-  await page.waitForTimeout(300);
-  console.log(`${label}: ${await page.textContent("#lm-status")} (${((Date.now() - t0) / 1000).toFixed(1)} s)`);
-};
-const shot = (name) => page.screenshot({ path: `${outdir}/${name}.png`, fullPage: true });
-const open = async (id) => {
-  await page.evaluate(() => (document.getElementById("lm-status").textContent = ""));
-  await page.click(`#list li:has(.gid:text-is("${id}"))`);
-  await waitRead(id);
-};
-const clickCanvas = async (i, fx, fy) => {
-  const c = (await page.$$(".lm-view canvas"))[i];
-  const b = await c.boundingBox();
-  await page.mouse.click(b.x + b.width * fx, b.y + b.height * fy);
-};
-
-// 1. first landmark: ortho 3D point
-await waitRead(await page.textContent("#lm-title"));
-await shot("01_point3d");
-await clickCanvas(0, 0.52, 0.48);
+const readDone = () => page.waitForFunction(() => / read in /.test(document.getElementById("lm-status").textContent ?? ""), null, { timeout: 300000 });
+await readDone();
+console.log(`[${secs()}] ${await page.textContent("#lm-title")}: ${await page.textContent("#lm-status")}`);
+const canvas = async (i) => (await page.$$("#lm-views canvas"))[i];
+let c = await canvas(0);
+let b = await c.boundingBox();
+await page.mouse.click(b.x + b.width * 0.5, b.y + b.height * 0.5);
 await page.keyboard.press("Space");
-console.log("after place:", await page.textContent("#lm-state"), "|", await page.textContent("#progress"));
-// wheel through slices on the sagittal view, then field 0.4 mm (full resolution)
-const sag = (await page.$$(".lm-view canvas"))[1];
-const sb = await sag.boundingBox();
-await page.mouse.move(sb.x + sb.width / 2, sb.y + sb.height / 2);
-await page.mouse.wheel(0, -300);
-await page.selectOption("#fov", "400");
+console.log(`[${secs()}] placed: ${await page.textContent("#progress")}`);
+await page.screenshot({ path: `${outdir}/03_annotate.png` });
+const before = await page.textContent("#lm-title");
+
+// back to 2: nudge and accept -> landmarks re-placed, back in 3
+await page.click("#realign");
+await page.waitForSelector("#align:not([hidden])");
+await page.click('#align-controls button:has-text("A") >> nth=0');
 await page.evaluate(() => (document.getElementById("lm-status").textContent = ""));
-await page.dispatchEvent("#fov", "change");
-await waitRead("fov 0.4 mm");
-await shot("02_point3d_fullres");
+await page.click("#align-accept");
+await page.waitForSelector("#annotate-app:not([hidden])");
+await readDone();
+console.log(`[${secs()}] re-aligned: on ${await page.textContent("#lm-title")} (was ${before}), ${await page.textContent("#progress")}`);
 
-// 2. barrel: flat view with depth slider
-await page.selectOption("#group-filter", "barrel");
-const firstBarrel = await page.textContent("#list li .gid");
-await open(firstBarrel);
-await shot("03_barrel");
-for (const d of ["-80", "-40", "0", "40", "80"]) {
-  await page.fill("#depth", d);
-  await page.dispatchEvent("#depth", "input");
-  await page.waitForTimeout(400);
-  await page.waitForFunction(() => !/reading/.test(document.getElementById("lm-status").textContent ?? ""), null, { timeout: 300000 });
-  await page.waitForTimeout(800);
-  const c = await page.$(".lm-view canvas");
-  await c.screenshot({ path: `${outdir}/04_barrel_depth${d}.png` });
-}
-console.log("barrel:", await page.textContent("#lm-status"));
-await clickCanvas(0, 0.45, 0.5);
-await page.keyboard.press("Space");
-
-// 3. hippocampus locked plane
-await page.selectOption("#group-filter", "hippo");
-await open(await page.textContent("#list li .gid"));
-await shot("05_hippo");
-
-// 4. layer probe: three clicks
-await page.selectOption("#group-filter", "probe");
-await open(await page.textContent("#list li .gid"));
-// pia, then white matter, then the suggested layer 4
-await clickCanvas(0, 0.5, 0.2);
-await page.keyboard.press("Space");
-await page.click('#lm-clicks button:has-text("3. WM")');
-await clickCanvas(0, 0.5, 0.8);
-await page.keyboard.press("Space");
-await page.click("#suggest-l4");
-console.log("suggest:", await page.textContent("#lm-status"));
-await page.keyboard.press("Space");
-console.log("probe:", await page.textContent("#lm-clicks"), "|", await page.textContent("#lm-state"));
-await shot("06_probe");
+// reset view
+c = await canvas(0);
+b = await c.boundingBox();
+await page.mouse.dblclick(b.x + b.width * 0.85, b.y + b.height * 0.85);
+await page.waitForTimeout(1500);
+await page.keyboard.press("r");
+await page.waitForTimeout(1500);
+console.log(`[${secs()}] reset view: field ${await page.inputValue("#fov")}`);
 
 // export
-await page.selectOption("#group-filter", "");
 const [dl] = await Promise.all([page.waitForEvent("download"), page.click("#export-tsv")]);
-const path = `${outdir}/${dl.suggestedFilename()}`;
-await dl.saveAs(path);
-console.log("exported", path);
-console.log(await (await import("node:fs")).promises.readFile(path, "utf8"));
+await dl.saveAs(`${outdir}/${dl.suggestedFilename()}`);
+console.log(`[${secs()}] exported ${dl.suggestedFilename()}:`);
+console.log(readFileSync(`${outdir}/${dl.suggestedFilename()}`, "utf8").trim().split("\n").slice(0, 2).join("\n"));
+
+// a subject protocol (positions for this image) needs no alignment
+if (subjProtocol) {
+  await page.setInputFiles("#protocol-input", subjProtocol);
+  await page.waitForSelector("#annotate-start:not([hidden])");
+  console.log(`[${secs()}] subject protocol: ${await page.textContent("#annotate-alignment")}`);
+  await page.click("#start");
+  await page.evaluate(() => (document.getElementById("lm-status").textContent = ""));
+  await readDone();
+  console.log(`[${secs()}] ${await page.textContent("#lm-title")}: ${await page.textContent("#lm-status")}`);
+}
 await browser.close();

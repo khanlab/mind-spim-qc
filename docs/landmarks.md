@@ -1,31 +1,31 @@
-# Landmark placement (landmarks.html)
+# Template alignment and landmark annotation
 
-Places registration-validation landmarks at full resolution. A protocol (JSON
-from spimquant-fiducials `make_protocol.py`) lists the landmarks for one image,
-their definitions, template thumbnails and starting positions. Starting positions
-come from an affine fit, not the registration under test, and are not marked
-(tick "show start position" to see them).
+The QC page works in steps on the one open image (the file is chosen once):
 
-The steps for an image are: (1) check it and confirm its orientation on the QC
-page, (2) align the template, (3) place the landmarks. What the QC page confirms
-and the alignments you accept are kept in this browser per image (file name and
-size) and filled in the next time.
-
-1. Open `landmarks.html`, choose the protocol and the image (.ims, OME-Zarr folder or .ozx).
-2. Enter your initials and a session number, then Start. For a **template protocol**
-   (landmarks defined on the template, e.g. ABAv3) also give the channel to show and
-   the image orientation (e.g. RPI) if the file does not store it.
-3. Template protocols only: **align the template**. An automatic affine runs first
-   (about 10 s); check the outline (magenta template edges, yellow template brain)
+1. **Check and orientation**: the QC views. Confirm the orientation ("I checked the
+   orientation"); it is kept in this browser for the image and filled in next time.
+2. **Align template**: an affine alignment of the ABAv3 template to the image
+   (about 10 s). Check the outline (magenta template edges, yellow template brain)
    and nudge it with the turn (5°), move (0.1 mm, shift 0.5 mm) and size (2 %)
-   buttons, "Refine from here" to search again from the nudged position, then
-   Accept. The alignment only starts each landmark view near its place: a few
-   hundred µm off is fine. It is kept in the browser and saved with the placements;
-   "Re-align template" in the side bar comes back to it.
-4. For each landmark: read the definition, compare with the template thumbnail,
+   buttons; "Refine from here" searches again from the nudged position; Accept.
+   Align on a channel showing the anatomy (nuclear stain or autofluorescence): the
+   page picks one by stain name, else the channel whose signal covers the most of
+   the brain. Left-right cannot be judged from the fit, so the orientation must come
+   from the acquisition. Accepted alignments are kept per image (file name and size).
+3. **Annotate**: appears once a landmark **protocol** (`.json`, from
+   spimquant-fiducials) is loaded ("Load protocol", or drop it on the page). A
+   template protocol uses the orientation from step 1 and the alignment from step 2;
+   a protocol made for this image needs neither. Enter your initials and a session
+   number and Start. The alignment only starts each landmark view near its place: a
+   few hundred µm off is fine; "Re-align template" goes back to step 2, and an
+   accepted change moves the starting positions (placements are kept).
+
+Starting positions are not marked (tick "show start position" to see them).
+
+In step 3, for each landmark: read the definition, compare with the template thumbnail,
    click the views to move the cursor, and press **Space** to place it.
    Mark **Absent** or **Damaged** if it cannot be placed.
-5. Save placements when done: `<image>_desc-<rater>_landmarks.tsv` and its `.json`
+When done, save placements: `<image>_desc-<rater>_landmarks.tsv` and its `.json`
    sidecar, for a derivatives dataset (positions are level-0 voxel indices of the
    image). "Save for 3D Slicer" writes the same points as `.fcsv` and `.mrk.json`
    (RAS mm). Placements are also kept in the browser and

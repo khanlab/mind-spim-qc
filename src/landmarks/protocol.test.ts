@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { apply, type M4 } from "../registration/affine";
-import { idx0ToWorld, tplVecToPhys, type Alignment } from "./alignment";
+import { idx0ToWorld, tplVecToPhys, type Alignment } from "./frames";
 import { derivativePrefix, fcsvText, imageStem, instantiate, parseProtocol, type Protocol } from "./protocol";
 
 const v0: [number, number, number] = [2, 2, 4];

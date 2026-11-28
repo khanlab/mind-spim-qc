@@ -22,6 +22,11 @@ import { PsfPanel, SIDE_COLORS } from "./panels/psf";
 import { rasAxisMap } from "./orientation";
 import { renderMetrics } from "./panels/metrics";
 import { folderFromEntry, folderFromFileList, folderFromHandle, type Folder } from "./folders";
+import { call, setFolder } from "./client";
+import { app, emit, setStep, type Step } from "./app";
+import { maskOf } from "./registration/affine";
+import "./landmarks/alignment";
+import { loadProtocolFile } from "./landmarks/annotate";
 import { getRecord, updateRecord } from "./imagestore";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -39,39 +44,6 @@ const idle = () => ($("busy").hidden = true);
 
 // ---- folders: files read on request of the worker --------------------------------
 
-let folder: Folder | null = null;
-
-// ---- worker -------------------------------------------------------------------
-
-const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
-let nextId = 0;
-const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; progress?: (f: number) => void }>();
-
-worker.onmessage = async (e) => {
-  const msg = e.data as Notice | { id: number; result?: any; error?: string };
-  if ("type" in msg && msg.type === "progress") return pending.get(msg.id)?.progress?.(msg.fraction);
-  if ("type" in msg && msg.type === "fetch") {
-    const file = folder ? await folder.read(msg.key) : null;
-    const bytes = file ? await file.arrayBuffer() : null;
-    const reply: FetchReply = { type: "fetched", fetchId: msg.fetchId, bytes };
-    worker.postMessage(reply, bytes ? [bytes] : []);
-    return;
-  }
-  const { id, result, error } = msg as { id: number; result?: any; error?: string };
-  const p = pending.get(id);
-  pending.delete(id);
-  if (error) p?.reject(new Error(error));
-  else p?.resolve(result);
-};
-
-type Body = Request extends infer R ? (R extends any ? Omit<R, "id"> : never) : never;
-function call<T>(body: Body, progress?: (f: number) => void): Promise<T> {
-  const id = nextId++;
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject, progress });
-    worker.postMessage({ ...body, id });
-  });
-}
 
 // ---- state --------------------------------------------------------------------
 
@@ -167,7 +139,23 @@ async function open(source: Source, size: number | null) {
       });
     }
     $("drop").hidden = true;
-    $("app").hidden = false;
+    app.name = name;
+    app.info = info;
+    app.orientation = state.orientation;
+    app.orientationConfirmed = $<HTMLInputElement>("confirmed").checked;
+    app.stains = state.channels.map((ch) => ch.stain);
+    // coverage on a subsample (~200 k voxels): enough for a fraction, and Otsu sorts its input
+    app.coverage = state.channels.map((ch) => {
+      const d = ch.volume.data;
+      const step = Math.max(1, Math.floor(d.length / 2e5));
+      const sub = new Float32Array(Math.ceil(d.length / step));
+      for (let i = 0, k = 0; i < d.length; i += step) sub[k++] = d[i];
+      const m = maskOf({ dims: [sub.length, 1, 1], data: sub, vox2world: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
+      return m.data.reduce((a, b) => a + b, 0) / m.data.length;
+    });
+    $("stepbar").hidden = false;
+    emit("image");
+    setStep("check");
     showInfo();
     showChannels();
     showOrientation();
@@ -225,7 +213,10 @@ function showChannels() {
     name.type = "text";
     name.value = ch.stain;
     name.placeholder = `Channel ${c}: stain?`;
-    name.oninput = () => (ch.stain = name.value.trim());
+    name.oninput = () => {
+      ch.stain = name.value.trim();
+      app.stains[c] = ch.stain;
+    };
     row.append(vis, sw, name);
     box.append(row);
   });
@@ -529,19 +520,27 @@ $("export").onclick = () => {
 };
 
 $("close").onclick = () => {
-  $("app").hidden = true;
+  for (const id of ["app", "align", "annotate", "stepbar"]) $(id).hidden = true;
+  (document.querySelector('#stepbar [data-step="annotate"]') as HTMLElement).hidden = true;
+  $("protocol-label").textContent = "";
   $("drop").hidden = false;
+  app.info = null;
+  app.name = "";
+  emit("image");
 };
+
+document.querySelectorAll<HTMLButtonElement>("#stepbar [data-step]").forEach((b) => (b.onclick = () => setStep(b.dataset.step as Step)));
+$("next-step").onclick = () => setStep("align");
 
 // ---- choosing and dropping ------------------------------------------------------------
 
 function openFile(file: File) {
-  folder = null;
+  setFolder(null);
   open({ kind: "file", file }, file.size);
 }
 
 function openFolder(f: Folder) {
-  folder = f;
+  setFolder(f);
   open({ kind: "folder", name: f.name }, null);
 }
 
@@ -560,7 +559,8 @@ document.addEventListener("drop", (e) => {
   if (entry?.isDirectory) openFolder(folderFromEntry(entry as FileSystemDirectoryEntry));
   else {
     const file = e.dataTransfer?.files[0];
-    if (file) openFile(file);
+    if (file && /\.json$/i.test(file.name)) void loadProtocolFile(file);
+    else if (file) openFile(file);
   }
 });
 
@@ -593,7 +593,10 @@ function saveOrientation() {
     orientationConfirmed: confirmed,
     orientationUpdated: new Date().toISOString(),
   });
-  $("orientation-note").textContent = confirmed ? "Saved in this browser for the landmark page." : "";
+  $("orientation-note").textContent = confirmed ? "Saved in this browser." : "";
   $("next-step").hidden = !confirmed;
+  app.orientation = state.orientation;
+  app.orientationConfirmed = confirmed;
+  emit("orientation");
 }
 $<HTMLInputElement>("confirmed").addEventListener("change", saveOrientation);
