@@ -100,3 +100,78 @@ export async function measurePsf(
   const extraZFwhm = extra.length ? extra[Math.floor((extra.length - 1) / 2)] : null;
   return { channel, voxelSize, points: out, ...pooled, average, radius: opts.radius, extraZFwhm };
 }
+
+/**
+ * The two sides of a mask along an array axis: the halves meet at the median
+ * tissue position, and each side keeps only the band between 10% and 40% (or
+ * 60% and 90%) of the tissue along the axis, away from the midline where the two
+ * light sheets meet and from the far edges.
+ */
+export function splitMask(
+  mask: Uint8Array,
+  shape: Shape,
+  axis: 0 | 1 | 2,
+  bands: [[number, number], [number, number]] = [
+    [0.1, 0.4],
+    [0.6, 0.9],
+  ],
+): { low: Uint8Array; high: Uint8Array; split: number } {
+  const [, ny, nx] = shape;
+  const posOf = (i: number) => (axis === 2 ? i % nx : axis === 1 ? Math.floor(i / nx) % ny : Math.floor(i / (nx * ny)));
+  const counts = new Float64Array(shape[axis]);
+  let total = 0;
+  for (let i = 0; i < mask.length; i++) if (mask[i]) counts[posOf(i)]++, total++;
+  // position below which a fraction of the tissue lies
+  const cum = new Float64Array(shape[axis]);
+  let acc = 0;
+  counts.forEach((c, k) => (cum[k] = (acc += c) / Math.max(1, total)));
+  const at = (f: number) => {
+    let k = 0;
+    while (k < cum.length - 1 && cum[k] <= f) k++;
+    return k;
+  };
+  const split = at(0.5);
+  const [lo, hi] = bands.map(([a, b]) => [at(a), at(b)]);
+  const low = new Uint8Array(mask.length);
+  const high = new Uint8Array(mask.length);
+  for (let i = 0; i < mask.length; i++) {
+    if (!mask[i]) continue;
+    const pos = posOf(i);
+    if (pos >= lo[0] && pos < Math.min(lo[1], split)) low[i] = 1;
+    else if (pos >= Math.max(hi[0], split) && pos < hi[1]) high[i] = 1;
+  }
+  return { low, high, split };
+}
+
+export interface SidesResult {
+  /** array axis the sheets travel along (2 = x, 1 = y) */
+  axis: 1 | 2;
+  /** where the halves meet, in level-0 voxels along the axis */
+  splitLevel0: number;
+  low: PsfResult;
+  high: PsfResult;
+}
+
+/** Points on each side of the tissue's midline along an axis. */
+export function sidePoints(mask: Uint8Array, plan: ReadPlan, axis: 1 | 2, n: number) {
+  const { low, high, split } = splitMask(mask, plan.shape, axis);
+  return { low: psfPoints(low, plan, n), high: psfPoints(high, plan, n), split };
+}
+
+export async function measureSides(
+  reader: ImageReader,
+  plan: ReadPlan,
+  mask: Uint8Array,
+  axis: 1 | 2,
+  n: number,
+  channel: number,
+  progress: (fraction: number) => void = () => {},
+  cancelled: () => boolean = () => false,
+): Promise<SidesResult> {
+  const pts = sidePoints(mask, plan, axis, n);
+  const low = await measurePsf(reader, plan, pts.low, channel, (f) => progress(f / 2), cancelled);
+  const high = await measurePsf(reader, plan, pts.high, channel, (f) => progress(0.5 + f / 2), cancelled);
+  const at: Shape = [0, 0, 0];
+  at[axis] = pts.split;
+  return { axis, splitLevel0: overviewToLevel0(reader.info, plan, at)[axis], low, high };
+}

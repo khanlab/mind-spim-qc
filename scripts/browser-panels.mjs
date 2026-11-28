@@ -31,6 +31,9 @@ t = Date.now();
 await page.click("#psf-panel button");
 await page.waitForSelector("#psf-panel .psf-results", { timeout: 900000 });
 console.log(`psf in ${(Date.now() - t) / 1000}s:`, (await page.$eval("#psf-panel .psf-results table", (e) => e.innerText)).replace(/\n/g, " | "));
+console.log("verdict:", await page.$eval("#psf-panel .psf-results", (e) => e.previousElementSibling?.textContent ?? ""));
+await page.$eval("#psf-panel", (e) => e.scrollIntoView());
+await page.screenshot({ path: out.replace(".png", "_psf.png"), clip: await page.$eval("#psf-panel", (e) => { const r = e.getBoundingClientRect(); return { x: r.x, y: r.y + window.scrollY - 40, width: r.width, height: r.height + 40 }; }), fullPage: true });
 // slices mode for zooms, and window change
 await page.click('input[name="zoom-mode"][value="slice"]');
 await page.$eval(".zoom-controls input[type=range]", (e) => { e.value = String(Number(e.max) * 0.05); e.dispatchEvent(new Event("input")); });

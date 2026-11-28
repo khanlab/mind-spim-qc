@@ -38,6 +38,10 @@ transposes of these, so rotating is instant.
   (`ln(Sz/Sxy) = c - (2 pi k)^2 (sz^2 - sxy^2)`, assuming isotropic structure).
   Tissue has few objects smaller than the PSF, so spot widths are upper bounds;
   compare scans of the same stain, ideally a nuclear one.
+  By default the two light-sheet sides are compared: the tissue is split at its
+  median position along image x (or y), points are spread through the 10-40% and
+  60-90% bands of the tissue on each side, and a side more than 20% wider along
+  z on two of three measures is flagged.
 
 ## Orientation
 
@@ -66,6 +70,7 @@ Based on two scans of one brain: a 4x scan stitched in Imaris and a 1x scan conv
 ```bash
 npx tsx scripts/psf-probe.ts <image> [points] [channels]   # metrics and resolution estimate
 npx tsx scripts/zoom-probe.ts <image> [channel]            # zoom level, cost and timing
+npx tsx scripts/sides-probe.ts <image> [channel] [points per side] [x|y]  # light-sheet sides
 node scripts/browser-panels.mjs http://localhost:4173 <image> out.png  # headless check of the panels
 npx tsx scripts/render-views.ts <image.ims|folder.ome.zarr> <RAI|file> out.png [channel]  # the three views as a PNG
 node scripts/browser-smoke.mjs http://localhost:4173 <image> out.png  # headless Chromium, after `npx vite preview`

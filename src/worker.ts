@@ -18,7 +18,7 @@ import { overviewToLevel0, type ImageReader, type ReadPlan, type Volume } from "
 import { arrayMips, autoWindow, type Mips } from "./views";
 import { analyseChannel, chooseSites, readZoom, type ChannelAnalysis, type ChannelMetrics, type Site, type Zoom } from "./analysis/channel";
 import { logCorrelation } from "./analysis/metrics";
-import { measurePsf, psfCost, psfPoints, type PsfResult } from "./analysis/run";
+import { measurePsf, measureSides, psfCost, psfPoints, sidePoints, type PsfResult, type SidesResult } from "./analysis/run";
 import type { Shape } from "./analysis/mask";
 
 export type Source = { kind: "file"; file: File } | { kind: "folder"; name: string };
@@ -29,14 +29,16 @@ export type Request =
   | { id: number; type: "correlations" }
   | { id: number; type: "sites"; channel: number; bright: number; dim: number }
   | { id: number; type: "zoom"; level0: Shape; channel: number }
-  | { id: number; type: "psf-plan"; channel: number; points: number }
-  | { id: number; type: "psf"; channel: number; points: number }
+  | { id: number; type: "psf-plan"; channel: number; points: number; sides: 1 | 2 | null }
+  | { id: number; type: "psf"; channel: number; points: number; sides: 1 | 2 | null }
   | { id: number; type: "cancel" };
 
 export interface PsfPlan {
-  points: Shape[];
-  /** level-0 voxels of the points */
+  /** level-0 voxels of the points, and the side of each (null without sides) */
   level0: Shape[];
+  side: ("low" | "high" | null)[];
+  /** with sides: the array axis and where the halves meet, level-0 voxels */
+  split: { axis: 1 | 2; level0: number } | null;
   bytes: number;
 }
 
@@ -57,7 +59,7 @@ export interface ReadResult {
   ms: number;
 }
 
-export type { ChannelMetrics, PsfResult, Site, Zoom };
+export type { ChannelMetrics, PsfResult, SidesResult, Site, Zoom };
 
 let reader: (ImageReader & { close(): void }) | null = null;
 let plan: ReadPlan | null = null;
@@ -183,25 +185,34 @@ self.onmessage = async (e: MessageEvent<Request | FetchReply>) => {
       reply(zoom, [zoom.volume.data.buffer as ArrayBuffer]);
     } else if (msg.type === "psf-plan") {
       const a = analyses[msg.channel];
-      const points = psfPoints(a.mask, a.plan, msg.points);
-      reply({
-        points,
-        level0: points.map((p) => overviewToLevel0(need().info, a.plan, p)),
-        bytes: psfCost(need(), a.plan, points),
-      } satisfies PsfPlan);
+      const r = need();
+      const l0 = (p: Shape) => overviewToLevel0(r.info, a.plan, p);
+      let plan: PsfPlan;
+      if (msg.sides) {
+        const pts = sidePoints(a.mask, a.plan, msg.sides, msg.points);
+        const at: Shape = [0, 0, 0];
+        at[msg.sides] = pts.split;
+        plan = {
+          level0: [...pts.low, ...pts.high].map(l0),
+          side: [...pts.low.map(() => "low" as const), ...pts.high.map(() => "high" as const)],
+          split: { axis: msg.sides, level0: l0(at)[msg.sides] },
+          bytes: psfCost(r, a.plan, [...pts.low, ...pts.high]),
+        };
+      } else {
+        const points = psfPoints(a.mask, a.plan, msg.points);
+        plan = { level0: points.map(l0), side: points.map(() => null), split: null, bytes: psfCost(r, a.plan, points) };
+      }
+      reply(plan);
     } else if (msg.type === "psf") {
       const a = analyses[msg.channel];
       cancelled = false;
-      const points = psfPoints(a.mask, a.plan, msg.points);
-      const result = await measurePsf(
-        need(),
-        a.plan,
-        points,
-        msg.channel,
-        (fraction) => self.postMessage({ type: "progress", id: msg.id, fraction } satisfies Notice),
-        () => cancelled,
-      );
-      reply(result);
+      const progress = (fraction: number) => self.postMessage({ type: "progress", id: msg.id, fraction } satisfies Notice);
+      if (msg.sides) {
+        reply(await measureSides(need(), a.plan, a.mask, msg.sides, msg.points, msg.channel, progress, () => cancelled));
+      } else {
+        const points = psfPoints(a.mask, a.plan, msg.points);
+        reply(await measurePsf(need(), a.plan, points, msg.channel, progress, () => cancelled));
+      }
     }
   } catch (err) {
     self.postMessage({ id: msg.id, error: String((err as Error)?.message ?? err) });

@@ -20,6 +20,15 @@ export interface Marker {
   level0: [number, number, number];
   label: string;
   kind: "zoom" | "psf";
+  /** for resolution points measured per light-sheet side */
+  side?: "low" | "high" | null;
+}
+
+/** A line across the views: where the two light-sheet sides meet. */
+export interface SplitLine {
+  /** array axis (1 = y, 2 = x) and level-0 position along it */
+  axis: 1 | 2;
+  level0: number;
 }
 
 export function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLElementTagNameMap[K]> = {}, ...children: (Node | string)[]) {

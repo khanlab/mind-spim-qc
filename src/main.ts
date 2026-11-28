@@ -18,7 +18,8 @@ import {
 import type { ChannelMetrics, FetchReply, Notice, ReadResult, Request, Source } from "./worker";
 import type { AppContext, Marker } from "./panels/context";
 import { ZoomPanel } from "./panels/zooms";
-import { PsfPanel } from "./panels/psf";
+import { PsfPanel, SIDE_COLORS } from "./panels/psf";
+import { rasAxisMap } from "./orientation";
 import { renderMetrics } from "./panels/metrics";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -419,9 +420,36 @@ function render() {
   }
 }
 
-function drawMarkers(ctx: CanvasRenderingContext2D, view: ViewName, t: { ox: number; oy: number; sx: number; sy: number; height: number }) {
+function drawMarkers(ctx: CanvasRenderingContext2D, view: ViewName, t: { ox: number; oy: number; sx: number; sy: number; width: number; height: number }) {
   const vol = state.channels[0].volume;
   const [h, v] = VIEW_AXES[view];
+  // where the two light-sheet sides meet, if that axis lies in this view
+  const split = psfPanel?.splitLine();
+  if (split) {
+    const at: [number, number, number] = [0, 0, 0];
+    at[split.axis] = split.level0;
+    const ov = level0ToOverview(state.info!, state.plan!, at)[split.axis];
+    const imageAxis = 2 - split.axis; // array axis 2 (x) is image axis 0
+    const map = rasAxisMap(state.orientation);
+    const k = map.findIndex((m) => m.imageAxis === imageAxis);
+    const n = vol.shape[split.axis];
+    const ras = map[k].flip ? n - 1 - ov : ov;
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = "rgba(255,255,255,.7)";
+    ctx.beginPath();
+    if (k === h) {
+      const x = t.ox + (ras + 0.5) * t.sx;
+      ctx.moveTo(x, t.oy);
+      ctx.lineTo(x, t.oy + t.height * t.sy);
+    } else if (k === v) {
+      const y = t.oy + (t.height - 1 - ras + 0.5) * t.sy;
+      ctx.moveTo(t.ox, y);
+      ctx.lineTo(t.ox + t.width * t.sx, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.font = "600 11px system-ui";
   ctx.lineWidth = 1.5;
   for (const m of markers()) {
@@ -429,7 +457,7 @@ function drawMarkers(ctx: CanvasRenderingContext2D, view: ViewName, t: { ox: num
     const ras = arrayToRas(state.orientation, vol.shape, ov);
     const x = t.ox + (ras[h] + 0.5) * t.sx;
     const y = t.oy + (t.height - 1 - ras[v] + 0.5) * t.sy;
-    ctx.strokeStyle = ctx.fillStyle = m.kind === "zoom" ? "#ffd60a" : "#ff6b9d";
+    ctx.strokeStyle = ctx.fillStyle = m.kind === "zoom" ? "#ffd60a" : m.side ? SIDE_COLORS[m.side] : "#ff6b9d";
     ctx.beginPath();
     if (m.kind === "zoom") ctx.arc(x, y, 6, 0, 2 * Math.PI);
     else ctx.rect(x - 5, y - 5, 10, 10);

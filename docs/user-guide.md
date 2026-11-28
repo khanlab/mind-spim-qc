@@ -64,6 +64,14 @@ Below the views:
   numbers are most useful compared with earlier scans of the same stain: a rise
   in z blur points to a problem with the light sheet or the optics.
 
+  **Left and right light sheets.** By default the tissue is split at its
+  midline along the image x axis (the dashed line on the views), and each side
+  is measured separately (points `a…` on the low-x side, `b…` on the high-x
+  side). If one side is clearly blurrier along z, a message says so: the light
+  sheet on that side may be out of alignment. Choose "along y" if your sheets
+  travel along y, or "no" to measure the whole tissue. "Low x" and "high x" are
+  sides of the image; which laser lights which side depends on the microscope.
+
 ## 4. Rate and save
 
 Rate the scan **pass**, **check** or **fail**, add a note, and press

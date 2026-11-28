@@ -95,3 +95,20 @@ describe("psf", () => {
     expect(avg.n).toBeGreaterThan(10);
   });
 });
+
+import { splitMask } from "./run";
+
+describe("light-sheet sides", () => {
+  it("splits the tissue at its midline along x, keeping a band on each side", () => {
+    const shape: Shape = [4, 4, 30];
+    const mask = new Uint8Array(4 * 4 * 30);
+    // tissue in x = 5..24 (20 columns): midline at 15
+    for (let z = 0; z < 4; z++) for (let y = 0; y < 4; y++) for (let x = 5; x < 25; x++) mask[(z * 4 + y) * 30 + x] = 1;
+    const { low, high, split } = splitMask(mask, shape, 2);
+    expect(split).toBe(15);
+    const xs = (m: Uint8Array) => [...new Set([...m.keys()].filter((i) => m[i]).map((i) => i % 30))].sort((a, b) => a - b);
+    // 10-40% of the tissue: x 7..12; 60-90%: x 17..22
+    expect(xs(low)).toEqual([7, 8, 9, 10, 11, 12]);
+    expect(xs(high)).toEqual([17, 18, 19, 20, 21, 22]);
+  });
+});
