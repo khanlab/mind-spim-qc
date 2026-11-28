@@ -82,4 +82,5 @@ table.metrics td.warn { color: var(--warn); }
 .avg-spot { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; max-width: 400px; }
 .avg-spot canvas { display: block; background: #000; }
 .avg-spot p { flex-basis: 100%; margin: 0; }
-header .help { margin-left: auto; color: var(--accent); font-size: 13px; }
+header .help:first-of-type { margin-left: auto; }
+header .help { color: var(--accent); font-size: 13px; }
