@@ -79,10 +79,15 @@ await shot("05_hippo");
 // 4. layer probe: three clicks
 await page.selectOption("#group-filter", "probe");
 await open(await page.textContent("#list li .gid"));
-for (const fy of [0.2, 0.45, 0.75]) {
-  await clickCanvas(0, 0.5, fy);
-  await page.keyboard.press("Space");
-}
+// pia, then white matter, then the suggested layer 4
+await clickCanvas(0, 0.5, 0.2);
+await page.keyboard.press("Space");
+await page.click('#lm-clicks button:has-text("3. WM")');
+await clickCanvas(0, 0.5, 0.8);
+await page.keyboard.press("Space");
+await page.click("#suggest-l4");
+console.log("suggest:", await page.textContent("#lm-status"));
+await page.keyboard.press("Space");
 console.log("probe:", await page.textContent("#lm-clicks"), "|", await page.textContent("#lm-state"));
 await shot("06_probe");
 

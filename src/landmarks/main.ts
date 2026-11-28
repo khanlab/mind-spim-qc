@@ -83,6 +83,8 @@ let vs: ViewState | null = null;
 let reading: Promise<void> | null = null;
 let wantRead = false;
 let lastSampling: Map<HTMLCanvasElement, Sampling> = new Map();
+/** the unsmoothed samples last drawn on each canvas (for the layer-4 suggestion) */
+let lastImage: Map<HTMLCanvasElement, Float32Array> = new Map();
 let timerStart = 0;
 
 const lm = () => proto!.landmarks[current];
@@ -402,6 +404,15 @@ function renderClicks() {
     });
     if (l.clicks.length > 1) parts.push(b);
   });
+  if (l.clicks.includes("L4") && ["pia", "WM"].every((c) => p.clicks.some((k) => k.label === c && k.position0))) {
+    const sug = document.createElement("button");
+    sug.className = "secondary";
+    sug.id = "suggest-l4";
+    sug.textContent = "Suggest L4";
+    sug.title = "Move the cursor to the peak of nuclear density between the pia and white-matter clicks; place it with Space if it is right";
+    sug.addEventListener("click", suggestL4);
+    parts.push(sug);
+  }
   if (l.clicks.length > 1) {
     const none = document.createElement("button");
     none.className = "secondary";
@@ -412,6 +423,62 @@ function renderClicks() {
   const st = p.status === "placed" && !isDone(l, p) ? "in progress" : p.status;
   $("lm-state").textContent = `${st}${p.seconds ? ` · ${p.seconds} s` : ""}`;
   box.replaceChildren(...parts);
+}
+
+/**
+ * Layer 4 is the densest band of nuclei in granular cortex: the peak of the
+ * smoothed intensity profile between the pia and white-matter clicks, averaged
+ * over a 40 um wide strip, searched between 20 % and 65 % of the depth.
+ */
+function suggestL4() {
+  const p = placement();
+  const pia = p.clicks.find((c) => c.label === "pia")?.position0;
+  const wm = p.clicks.find((c) => c.label === "WM")?.position0;
+  const v = views[0];
+  const s = lastSampling.get(v.canvas);
+  const img = lastImage.get(v.canvas);
+  if (!pia || !wm || !s || !img) return;
+  const a = physToPixel(s, l0ToPhys(info!, pia));
+  const b = physToPixel(s, l0ToPhys(info!, wm));
+  const len = Math.hypot(b.col - a.col, b.row - a.row);
+  const umPerPx = s.widthUm / s.px;
+  const n = Math.max(10, Math.round(len));
+  const half = Math.max(1, Math.round(20 / umPerPx));
+  const dx = (b.col - a.col) / len;
+  const dy = (b.row - a.row) / len;
+  const prof = new Float32Array(n + 1).fill(NaN);
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    let sum = 0;
+    let cnt = 0;
+    for (let k = -half; k <= half; k++) {
+      const c = Math.round(a.col + t * (b.col - a.col) - k * dy);
+      const r = Math.round(a.row + t * (b.row - a.row) + k * dx);
+      if (c < 0 || r < 0 || c >= s.px || r >= s.px) continue;
+      const val = img[r * s.px + c];
+      if (Number.isFinite(val)) {
+        sum += val;
+        cnt++;
+      }
+    }
+    if (cnt) prof[i] = sum / cnt;
+  }
+  const sm = blurNaN(prof, n + 1, 1, Math.max(1, 15 / umPerPx / (len / n)));
+  let best = -1;
+  for (let i = Math.round(0.2 * n); i <= Math.round(0.65 * n); i++) if (Number.isFinite(sm[i]) && (best < 0 || sm[i] > sm[best])) best = i;
+  const i0 = Math.round(0.2 * n);
+  const i1 = Math.round(0.65 * n);
+  // a real band rises above both ends of the search window (5 % of the range)
+  const lo = Math.min(sm[i0], sm[i1]);
+  const range = Math.max(...Array.from(sm).filter(Number.isFinite)) - Math.min(...Array.from(sm).filter(Number.isFinite));
+  if (best < 0 || best === i0 || best === i1 || sm[best] - Math.max(sm[i0], sm[i1]) < 0.05 * range || !(sm[best] > lo)) {
+    $("lm-status").textContent = "No clear layer 4 peak between the pia and white matter (agranular cortex?): place it by eye, or mark it absent.";
+    return;
+  }
+  const t = best / n;
+  vs!.cursor = pixelToPhys(s, a.col + t * (b.col - a.col), a.row + t * (b.row - a.row));
+  $("lm-status").textContent = `Suggested layer 4 at ${(100 * t).toFixed(0)} % of the depth (pia 0 %, white matter 100 %). Check it, then place with Space.`;
+  draw();
 }
 
 function setClick(pos0: V3 | null) {
@@ -812,6 +879,7 @@ function draw() {
     let img: Float32Array = new Float32Array(s.px * s.px).fill(NaN);
     for (const t of tilesRead) if (t.view === i && t.roi) sampleInto(info!, t.block, s, img, t.roi);
     for (const t of tilesRead) sampleInto(info!, t.block, s, img);
+    lastImage.set(v.canvas, img);
     if (smoothUm > 0) img = blurNaN(img, s.px, s.px, smoothUm / (s.widthUm / s.px));
     const [lo, hi] = windowOf(img, 0.5, hiPct);
     const ctx = v.canvas.getContext("2d")!;
