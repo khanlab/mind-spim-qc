@@ -26,6 +26,8 @@ export interface Alignment {
   tpl2world: M4;
   /** template world (mm) -> level-0 voxel index (x, y, z) */
   tpl2idx0: M4;
+  /** image channel shown and aligned */
+  channel?: number;
   method: string;
   nudges: string[];
   overlap?: number;
@@ -94,15 +96,28 @@ async function start(ctx: AlignContext, done: (a: Alignment) => void) {
   }
   const n = shapeXYZ(info, level);
   const box: Box = { level, start: [0, 0, 0], stop: [n[2], n[1], n[0]] };
+  let channel = ctx.channel;
   const [vol, tAnat, tMask] = await Promise.all([
-    ctx.call<Volume>({ type: "box", box, channel: ctx.channel }),
+    ctx.call<Volume>({ type: "box", box, channel }),
     loadNifti(ctx.template.anat),
     loadNifti(ctx.template.mask),
   ]);
-  const block: Block = { box, data: vol.data };
+  let block: Block = { box, data: vol.data };
   const f = levelFactor(info, level);
   const levelToIdx0: M4 = [f[0], 0, 0, (f[0] - 1) / 2, 0, f[1], 0, (f[1] - 1) / 2, 0, 0, f[2], (f[2] - 1) / 2, 0, 0, 0, 1];
-  const grid: Grid = { dims: n, data: Float32Array.from(vol.data), vox2world: mul(toWorld, levelToIdx0) };
+  let grid: Grid = { dims: n, data: Float32Array.from(vol.data), vox2world: mul(toWorld, levelToIdx0) };
+  const sel = $<HTMLSelectElement>("align-channel");
+  sel.replaceChildren(...info.channels.map((c, i) => new Option(`${i}${c.name && !/not specified/i.test(c.name) ? ` (${c.name})` : ""}`, String(i))));
+  sel.value = String(channel);
+  sel.onchange = async () => {
+    channel = Number(sel.value);
+    status(`Reading channel ${channel}…`);
+    const v = await ctx.call<Volume>({ type: "box", box, channel });
+    block = { box, data: v.data };
+    grid = { ...grid, data: Float32Array.from(v.data) };
+    subWindow = null;
+    await runAuto();
+  };
   const tpl: Grid = { dims: tAnat.dims, data: tAnat.data, vox2world: tAnat.affine };
   const tplMask: Grid = { dims: tMask.dims, data: tMask.data, vox2world: tMask.affine };
   const tplW2V = inv(tpl.vox2world);
@@ -290,12 +305,12 @@ async function start(ctx: AlignContext, done: (a: Alignment) => void) {
     host.hidden = true;
     done({
       template: ctx.template.name, image: ctx.imageName, orientation: o, voxel0_um_xyz: v0,
-      tpl2world: T, tpl2idx0: mul(inv(toWorld), T), method, nudges, overlap, created: new Date().toISOString(),
+      tpl2world: T, tpl2idx0: mul(inv(toWorld), T), channel, method, nudges, overlap, created: new Date().toISOString(),
     });
   };
   $("align-save").onclick = () => {
     const al: Alignment = { template: ctx.template.name, image: ctx.imageName, orientation: o, voxel0_um_xyz: v0,
-      tpl2world: T, tpl2idx0: mul(inv(toWorld), T), method, nudges, overlap, created: new Date().toISOString() };
+      tpl2world: T, tpl2idx0: mul(inv(toWorld), T), channel, method, nudges, overlap, created: new Date().toISOString() };
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([JSON.stringify(al, null, 1)], { type: "application/json" }));
     a.download = `${ctx.imageName.replace(/\.(ims|ozx|zip|ome\.zarr|zarr)$/i, "").replace(/_[A-Za-z0-9]+$/, "")}_from-${ctx.template.name}_to-image_desc-affine_xfm.json`;

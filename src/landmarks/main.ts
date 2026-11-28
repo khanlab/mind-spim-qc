@@ -233,13 +233,15 @@ async function start() {
     }
     const savedText = localStorage.getItem(alignKey(tname, sourceName));
     const savedAl = savedText ? (JSON.parse(savedText) as Alignment) : null;
+    // a saved alignment brings its channel unless one was chosen
+    const ch = savedAl?.channel !== undefined && !$<HTMLInputElement>("channel").value ? savedAl.channel : channel;
     $("drop").hidden = true;
     alignment = await runAlignment({
-      info, channel, imageName: sourceName, orientation, call,
+      info, channel: ch, imageName: sourceName, orientation, call,
       template: { name: tname, ...urls }, saved: savedAl && savedAl.orientation === orientation ? savedAl : null,
     });
     localStorage.setItem(alignKey(tname, sourceName), JSON.stringify(alignment));
-    proto = placeTemplate(templateProto, alignment, channel);
+    proto = placeTemplate(templateProto, alignment, alignment.channel ?? channel);
   }
   if (proto.image.channel >= info.channels.length) {
     status(`The protocol uses channel ${proto.image.channel}, the image has ${info.channels.length}.`, true);
@@ -291,7 +293,7 @@ $("realign").addEventListener("click", async () => {
     template: { name: alignment.template, ...TEMPLATES[alignment.template] }, saved: alignment,
   });
   localStorage.setItem(alignKey(alignment.template, sourceName), JSON.stringify(alignment));
-  proto = placeTemplate(templateProto, alignment, proto!.image.channel);
+  proto = placeTemplate(templateProto, alignment, alignment.channel ?? proto!.image.channel);
   session!.alignment = alignment;
   save();
   $("app").hidden = false;

@@ -28,7 +28,7 @@
         <dt>Image</dt><dd id="image-name">–</dd>
       </dl>
       <div class="rater-row">
-        <label title="for template protocols: the channel to show and align">Channel <input id="channel" type="number" min="0" value="0" class="narrow" /></label>
+        <label title="for template protocols: the channel to show and align">Channel <input id="channel" type="number" min="0" placeholder="0" class="narrow" /></label>
         <label title="OrientationStringXYZ; leave empty to use the one stored in the file">Orientation <input id="orientation" maxlength="3" placeholder="from file" class="narrow" /></label>
       </div>
       <div class="rater-row">
@@ -54,6 +54,9 @@
       <div class="align-layout">
         <div id="align-views" class="lm-views"></div>
         <div class="align-side">
+          <label class="align-row"><span>Channel</span><select id="align-channel"></select></label>
+          <p class="hint">Align on a channel that shows the anatomy (nuclear stain or autofluorescence), not a sparse stain.
+            Left–right cannot be judged from the fit: a mirrored orientation (e.g. LAI for RAI) fits almost as well, so take the orientation from the acquisition.</p>
           <div id="align-controls"></div>
           <p id="align-info" class="hint"></p>
           <div class="align-buttons">
@@ -89,7 +92,7 @@
         </div>
         <div class="lm-info">
           <p id="lm-def"></p>
-          <figure id="lm-ref-fig"><img id="lm-ref" alt="template reference" /><figcaption>template (2 mm, sagittal / coronal / axial)</figcaption></figure>
+          <figure id="lm-ref-fig"><img id="lm-ref" alt="template reference" /><figcaption>template (2 mm; coronal, sagittal, axial as the views)</figcaption></figure>
         </div>
         <div class="lm-clicks" id="lm-clicks"></div>
         <div class="lm-controls">
