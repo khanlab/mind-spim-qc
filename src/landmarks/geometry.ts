@@ -40,12 +40,23 @@ export const voxel0 = (info: ImageInfo): V3 => {
   return [v[2], v[1], v[0]];
 };
 
-/** Effective voxel size of a level in um, x, y, z (from the shape ratio). */
-export function levelVoxel(info: ImageInfo, level: number): V3 {
+/**
+ * Downsampling factor of a level per axis (x, y, z): the integer nearest the
+ * shape ratio. Pyramids halve with floor(n / 2) (Imaris) or scale by integer
+ * factors (OME-Zarr), so a level-L voxel k covers level-0 voxels
+ * [k f, (k + 1) f) exactly; the shape ratio itself drifts (6906 / 215 = 32.12).
+ */
+export function levelFactor(info: ImageInfo, level: number): V3 {
   const n0 = shapeXYZ(info, 0);
   const nl = shapeXYZ(info, level);
+  return [0, 1, 2].map((a) => Math.max(1, Math.round(n0[a] / nl[a]))) as V3;
+}
+
+/** Voxel size of a level in um, x, y, z. */
+export function levelVoxel(info: ImageInfo, level: number): V3 {
+  const f = levelFactor(info, level);
   const v0 = voxel0(info);
-  return [0, 1, 2].map((a) => (v0[a] * n0[a]) / nl[a]) as V3;
+  return [0, 1, 2].map((a) => v0[a] * f[a]) as V3;
 }
 
 export const l0ToPhys = (info: ImageInfo, p: V3): V3 => {
@@ -58,13 +69,12 @@ export const physToL0 = (info: ImageInfo, p: V3): V3 => {
   return [p[0] / v[0], p[1] / v[1], p[2] / v[2]];
 };
 
-/** Per-axis affine physical -> level index: idx = p * s + b. */
+/** Per-axis affine physical -> level index: idx = p * s + b (level-0 index i -> (i + 0.5) / f - 0.5). */
 export function levelMap(info: ImageInfo, level: number): { s: V3; b: V3 } {
-  const n0 = shapeXYZ(info, 0);
-  const nl = shapeXYZ(info, level);
+  const f = levelFactor(info, level);
   const v0 = voxel0(info);
-  const s = [0, 1, 2].map((a) => nl[a] / (n0[a] * v0[a])) as V3;
-  const b = [0, 1, 2].map((a) => (0.5 * nl[a]) / n0[a] - 0.5) as V3;
+  const s = [0, 1, 2].map((a) => 1 / (f[a] * v0[a])) as V3;
+  const b = [0, 1, 2].map((a) => 0.5 / f[a] - 0.5) as V3;
   return { s, b };
 }
 

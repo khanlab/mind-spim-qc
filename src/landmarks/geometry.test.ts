@@ -31,6 +31,15 @@ describe("frames", () => {
     i1.forEach((v) => expect(v).toBeCloseTo(0, 9));
     expect(levelVoxel(info, 2)).toEqual([6.5, 6.5, 11]);
   });
+  it("maps levels by integer factors, not by the drifting shape ratio", () => {
+    // Imaris: floor-halving; level 5 of 6906 x 9948 x 3163 is 215 x 310 x 98 (ratio 32.12, 32.09, 32.28)
+    const ims: ImageInfo = { ...info, levels: [[3163, 9948, 6906], [1581, 4974, 3453], [790, 2487, 1726], [395, 1243, 863], [197, 621, 431], [98, 310, 215]]
+      .map((shape, l) => ({ shape: shape as [number, number, number], voxelSize: [2.2 * 2 ** l, 1.625 * 2 ** l, 1.625 * 2 ** l] as [number, number, number] })) };
+    // level-5 voxel 97 (z) covers level-0 voxels 3104..3135, centre 3119.5
+    const p = l0ToPhys(ims, [0, 0, 3119.5]);
+    expect(physToLevel(ims, 5, p)[2]).toBeCloseTo(97, 9);
+    expect(levelVoxel(ims, 5)).toEqual([52, 52, 70.4].map((v) => expect.closeTo(v, 9)));
+  });
 });
 
 describe("planes", () => {
