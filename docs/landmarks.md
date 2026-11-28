@@ -6,6 +6,11 @@ their definitions, template thumbnails and starting positions. Starting position
 come from an affine fit, not the registration under test, and are not marked
 (tick "show start position" to see them).
 
+The steps for an image are: (1) check it and confirm its orientation on the QC
+page, (2) align the template, (3) place the landmarks. What the QC page confirms
+and the alignments you accept are kept in this browser per image (file name and
+size) and filled in the next time.
+
 1. Open `landmarks.html`, choose the protocol and the image (.ims, OME-Zarr folder or .ozx).
 2. Enter your initials and a session number, then Start. For a **template protocol**
    (landmarks defined on the template, e.g. ABAv3) also give the channel to show and

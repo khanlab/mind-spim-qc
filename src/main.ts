@@ -22,6 +22,7 @@ import { PsfPanel, SIDE_COLORS } from "./panels/psf";
 import { rasAxisMap } from "./orientation";
 import { renderMetrics } from "./panels/metrics";
 import { folderFromEntry, folderFromFileList, folderFromHandle, type Folder } from "./folders";
+import { getRecord, updateRecord } from "./imagestore";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -139,6 +140,15 @@ async function open(source: Source, size: number | null) {
     state.orientation = suggested.orientation;
     state.channels = [];
     $<HTMLInputElement>("confirmed").checked = false;
+    $("orientation-note").textContent = "";
+    // an orientation confirmed before for this image comes back
+    const rec = getRecord(name, info.levels[0].shape);
+    if (rec?.orientationConfirmed && rec.orientation && isValid(rec.orientation)) {
+      state.orientation = rec.orientation;
+      $<HTMLInputElement>("confirmed").checked = true;
+      $("orientation-note").textContent = `Confirmed before (${(rec.orientationUpdated ?? "").slice(0, 10)}).`;
+    }
+    $("next-step").hidden = !$<HTMLInputElement>("confirmed").checked;
 
     const n = info.channels.length;
     for (let c = 0; c < n; c++) {
@@ -240,6 +250,7 @@ function showOrientation() {
 function setOrientation(s: string) {
   state.orientation = s;
   $<HTMLInputElement>("confirmed").checked = false;
+  saveOrientation();
   updateOrientation();
   render();
 }
@@ -571,3 +582,18 @@ $<HTMLInputElement>("folder-input").onchange = (e) => {
   const files = (e.target as HTMLInputElement).files;
   if (files?.length) openFolder(folderFromFileList(files));
 };
+
+/** Keeps the orientation for the landmark page and later sessions (only on the user's changes). */
+function saveOrientation() {
+  if (!state.name || !state.info) return;
+  const confirmed = $<HTMLInputElement>("confirmed").checked;
+  updateRecord(state.name, {
+    shape0: state.info.levels[0].shape,
+    orientation: state.orientation,
+    orientationConfirmed: confirmed,
+    orientationUpdated: new Date().toISOString(),
+  });
+  $("orientation-note").textContent = confirmed ? "Saved in this browser for the landmark page." : "";
+  $("next-step").hidden = !confirmed;
+}
+$<HTMLInputElement>("confirmed").addEventListener("change", saveOrientation);

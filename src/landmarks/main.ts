@@ -15,6 +15,7 @@ import {
   type Block, type Plane, type Roi, type Sampling, type V3,
 } from "./geometry";
 import { apply } from "../registration/affine";
+import { getRecord, updateRecord } from "../imagestore";
 import { idx0ToWorld, runAlignment, tplVecToPhys, type Alignment } from "./alignment";
 import {
   derivativePrefix, emptyPlacement, fcsvText, instantiate, isDone, markupsJson, parseProtocol, sessionTsv, sidecar, storageKey, worldPoints,
@@ -138,7 +139,27 @@ function setImage(s: Source, name: string) {
   updateStart();
 }
 
+/** Fills the steps from what is known about the image (QC page, earlier sessions). */
+function prefill() {
+  if (!sourceName) return;
+  const rec = getRecord(sourceName);
+  const input = $<HTMLInputElement>("orientation");
+  const note = $("orient-note");
+  if (rec?.orientation && !input.value) input.value = rec.orientation;
+  if (rec?.orientation)
+    note.textContent = rec.orientationConfirmed
+      ? `confirmed on the QC page (${(rec.orientationUpdated ?? "").slice(0, 10)})`
+      : "from the QC page, not confirmed there";
+  const tname = proto?.template ?? "ABAv3";
+  const al = (rec?.alignments?.[tname] ?? null) as Alignment | null;
+  $("align-note").textContent = proto && proto.space !== "template" ? "not needed: this protocol has positions for one image"
+    : al ? `saved alignment from ${al.created.slice(0, 10)} (${al.method}${al.nudges.length ? ` + ${al.nudges.length} nudges` : ""}) will open for checking`
+    : "will run after Start";
+  if (al?.channel !== undefined && !$<HTMLInputElement>("channel").value) $<HTMLInputElement>("channel").value = String(al.channel);
+}
+
 function updateStart() {
+  prefill();
   const ok = !!proto && !!source && $<HTMLInputElement>("rater").value.trim().length > 0;
   $<HTMLButtonElement>("start").disabled = !ok;
   if (proto && source && sourceName !== proto.image.name)
@@ -213,6 +234,8 @@ async function start() {
   }
   idle();
   const warnings: string[] = [];
+  if (getRecord(sourceName) && !getRecord(sourceName, info.levels[0].shape))
+    warnings.push("a saved record for this file name is for an image of another size and was ignored");
   if (proto.space === "template") {
     templateProto = proto;
     const channel = Number($<HTMLInputElement>("channel").value || 0);
@@ -231,8 +254,9 @@ async function start() {
       status(`No template ${tname} on this site.`, true);
       return;
     }
+    const recAl = getRecord(sourceName, info.levels[0].shape)?.alignments?.[tname] as Alignment | undefined;
     const savedText = localStorage.getItem(alignKey(tname, sourceName));
-    const savedAl = savedText ? (JSON.parse(savedText) as Alignment) : null;
+    const savedAl = recAl ?? (savedText ? (JSON.parse(savedText) as Alignment) : null);
     // a saved alignment brings its channel unless one was chosen
     const ch = savedAl?.channel !== undefined && !$<HTMLInputElement>("channel").value ? savedAl.channel : channel;
     $("drop").hidden = true;
@@ -240,7 +264,7 @@ async function start() {
       info, channel: ch, imageName: sourceName, orientation, call,
       template: { name: tname, ...urls }, saved: savedAl && savedAl.orientation === orientation ? savedAl : null,
     });
-    localStorage.setItem(alignKey(tname, sourceName), JSON.stringify(alignment));
+    saveAlignment(alignment);
     proto = placeTemplate(templateProto, alignment, alignment.channel ?? channel);
   }
   if (proto.image.channel >= info.channels.length) {
@@ -277,6 +301,11 @@ async function start() {
   setInterval(tick, 1000);
 }
 
+function saveAlignment(al: Alignment) {
+  const rec = getRecord(sourceName, info!.levels[0].shape);
+  updateRecord(sourceName, { shape0: info!.levels[0].shape, alignments: { ...(rec?.alignments ?? {}), [al.template]: al } });
+}
+
 function placeTemplate(tp: Protocol, al: Alignment, channel: number): Protocol {
   return instantiate(tp, (mm) => apply(al.tpl2idx0, mm), (v) => tplVecToPhys(al, v), {
     name: sourceName, orientation: al.orientation, channel,
@@ -292,7 +321,7 @@ $("realign").addEventListener("click", async () => {
     info, channel: proto!.image.channel, imageName: sourceName, orientation: alignment.orientation, call,
     template: { name: alignment.template, ...TEMPLATES[alignment.template] }, saved: alignment,
   });
-  localStorage.setItem(alignKey(alignment.template, sourceName), JSON.stringify(alignment));
+  saveAlignment(alignment);
   proto = placeTemplate(templateProto, alignment, alignment.channel ?? proto!.image.channel);
   session!.alignment = alignment;
   save();
@@ -614,6 +643,28 @@ const step = (d: number) => {
 $("next").addEventListener("click", () => step(1));
 $("prev").addEventListener("click", () => step(-1));
 $("recenter").addEventListener("click", recenter);
+$("reset-view").addEventListener("click", resetView);
+/** Back to the landmark's start: position, default field, no depth or tilt. Placements are kept. */
+function resetView() {
+  if (!vs || !info) return;
+  const l = lm();
+  const start = l0ToPhys(info, l.position0);
+  vs.cursor = start;
+  vs.center = start;
+  vs.fov = DEFAULT_FOV[l.group] ?? (l.view.kind === "ortho" ? 1600 : 1200);
+  vs.depth = l.view.depth_um ?? 0;
+  vs.tiltU = 0;
+  vs.tiltV = 0;
+  $<HTMLSelectElement>("fov").value = String(vs.fov);
+  $<HTMLInputElement>("depth").value = String(vs.depth);
+  $("depth-value").textContent = `${vs.depth} µm`;
+  $<HTMLInputElement>("tilt-u").value = "0";
+  $<HTMLInputElement>("tilt-v").value = "0";
+  $("tilt-value").textContent = "0°, 0°";
+  $<HTMLInputElement>("slab").value = String(l.view.slab_um ?? (l.view.kind === "ortho" ? 0 : 8));
+  $<HTMLInputElement>("smooth").value = String(l.view.smooth_um ?? 0);
+  void refresh();
+}
 function recenter() {
   if (!vs) return;
   vs.center = vs.cursor;
@@ -650,6 +701,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "a") $("absent").click();
   else if (k === "d") $("damaged").click();
   else if (k === "c") recenter();
+  else if (k === "r") resetView();
   else if (k === "n") step(1);
   else if (k === "p") step(-1);
   else if (k === "+" || k === "=" || k === "-") {

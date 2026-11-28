@@ -27,10 +27,13 @@
         <dt>Protocol</dt><dd id="protocol-name">–</dd>
         <dt>Image</dt><dd id="image-name">–</dd>
       </dl>
-      <div class="rater-row">
-        <label title="for template protocols: the channel to show and align">Channel <input id="channel" type="number" min="0" placeholder="0" class="narrow" /></label>
-        <label title="OrientationStringXYZ; leave empty to use the one stored in the file">Orientation <input id="orientation" maxlength="3" placeholder="from file" class="narrow" /></label>
-      </div>
+      <ol class="steps">
+        <li><b>Orientation</b> <input id="orientation" maxlength="3" placeholder="from file" class="narrow" title="OrientationStringXYZ" />
+          <span id="orient-note" class="hint">Confirm it on the <a href="./index.html" target="_blank" rel="noopener">QC page</a> first; it is then filled in here.</span></li>
+        <li><b>Template alignment</b> (template protocols) on channel <input id="channel" type="number" min="0" placeholder="0" class="narrow" />
+          <span id="align-note" class="hint"></span></li>
+        <li><b>Landmarks</b></li>
+      </ol>
       <div class="rater-row">
         <label>Rater <input id="rater" placeholder="initials" maxlength="20" /></label>
         <label>Session <input id="session" value="1" maxlength="10" class="narrow" /></label>
@@ -119,6 +122,7 @@
           <button id="skip" class="secondary">Skip</button>
           <button id="clear" class="secondary">Clear</button>
           <span class="spacer"></span>
+          <button id="reset-view" class="secondary" title="R: back to the landmark's start: position, field, depth and tilt (placements are kept)">Reset view</button>
           <button id="recenter" class="secondary" title="C">Centre on cursor</button>
           <button id="prev" class="secondary" title="P">◀ Previous</button>
           <button id="next" title="N">Next ▶</button>
@@ -126,7 +130,7 @@
         <textarea id="lm-note" rows="2" placeholder="Note on this landmark"></textarea>
         <p id="lm-status" class="hint"></p>
         <p class="hint keys">Click a view to move the cursor; wheel moves through slices (shift: faster); double-click centres the view.
-          Keys: Space place · A absent · D damaged · C centre · N/P next/previous · +/− field.</p>
+          Keys: Space place · A absent · D damaged · C centre · R reset view · N/P next/previous · +/− field.</p>
       </section>
     </main>
     <script type="module" src="./src/landmarks/main.ts"></script>
