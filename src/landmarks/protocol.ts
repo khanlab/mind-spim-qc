@@ -37,6 +37,10 @@ export interface Landmark {
 export interface Protocol {
   protocol: string;
   version: number;
+  /** "template": positions and view vectors in template space (RAS mm); the page
+   * aligns the template to the image first. "subject" (default): voxel positions. */
+  space?: "subject" | "template";
+  template?: string;
   image: {
     name: string;
     orientation: string;
@@ -50,9 +54,15 @@ export interface Protocol {
 
 export function parseProtocol(text: string): Protocol {
   const p = JSON.parse(text) as Protocol;
-  if (!p || !Array.isArray(p.landmarks) || !p.image) throw new Error("Not a landmark protocol (no image or landmarks)");
+  if (!p || !Array.isArray(p.landmarks)) throw new Error("Not a landmark protocol (no landmarks)");
+  const tpl = p.space === "template";
+  if (tpl) {
+    p.template ??= "ABAv3";
+    p.image ??= { name: "", orientation: "", channel: 0 };
+  } else if (!p.image) throw new Error("Not a landmark protocol (no image)");
   for (const l of p.landmarks) {
-    if (!l.id || !Array.isArray(l.position0) || l.position0.length !== 3) throw new Error(`Landmark without id or position: ${JSON.stringify(l).slice(0, 80)}`);
+    const pos = tpl ? l.template_mm : l.position0;
+    if (!l.id || !Array.isArray(pos) || pos.length !== 3) throw new Error(`Landmark without id or position: ${JSON.stringify(l).slice(0, 80)}`);
     if (!l.clicks?.length) l.clicks = ["point"];
     if (!l.view) l.view = { kind: "ortho" };
   }
@@ -89,6 +99,8 @@ export interface Session {
   session: string;
   started: string;
   placements: Record<string, Placement>;
+  /** template alignment used to place a template protocol (see alignment.ts) */
+  alignment?: unknown;
 }
 
 export const emptyPlacement = (): Placement => ({ status: "todo", clicks: [], note: "", seconds: 0, updated: "" });
@@ -126,4 +138,113 @@ export function sessionTsv(proto: Protocol, s: Session, voxel0: V3): string {
     else for (const c of p.clicks) rows.push(base(c.label, c.position0).map(clean));
   }
   return rows.map((r) => r.join("\t")).join("\n") + "\n";
+}
+
+/**
+ * A template protocol placed in an image by an alignment: positions become
+ * level-0 voxel indices, view vectors unit vectors of the image's physical frame
+ * (each vector mapped separately and orthonormalised by Gram-Schmidt, never by
+ * cross products, which would flip in left-handed image frames).
+ */
+export function instantiate(
+  p: Protocol,
+  toIdx0: (mm: number[]) => V3,
+  vecToPhys: (v: number[]) => V3,
+  image: Protocol["image"],
+): Protocol {
+  const dotp = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const unit = (a: V3): V3 => {
+    const n = Math.hypot(...a) || 1;
+    return [a[0] / n, a[1] / n, a[2] / n];
+  };
+  const minus = (a: V3, b: V3, k: number): V3 => [a[0] - k * b[0], a[1] - k * b[1], a[2] - k * b[2]];
+  return {
+    ...p,
+    space: "subject",
+    image,
+    landmarks: p.landmarks.map((l) => {
+      const view = { ...l.view };
+      if (view.kind !== "ortho" && view.u && view.v && view.normal) {
+        const u = unit(vecToPhys(view.u));
+        let v = vecToPhys(view.v);
+        v = unit(minus(v, u, dotp(v, u)));
+        let n = vecToPhys(view.normal);
+        n = unit(minus(minus(n, u, dotp(n, u)), v, dotp(n, v)));
+        Object.assign(view, { u, v, normal: n });
+      }
+      return { ...l, view, position0: toIdx0(l.template_mm!) };
+    }),
+  };
+}
+
+// ---- derivatives export -------------------------------------------------------------
+
+/** BIDS-style stem of an image name: extension and final suffix dropped (sub-1_..._SPIM.ims -> sub-1_...). */
+export function imageStem(name: string): string {
+  const base = name.replace(/\.(ims|ozx|zip|ome\.zarr|zarr|nii\.gz|nii)$/i, "");
+  return /_[A-Za-z0-9]+$/.test(base) && base.includes("-") ? base.replace(/_[A-Za-z0-9]+$/, "") : base;
+}
+
+/** File prefix for a rater's session: <stem>_desc-<rater>[ses<n>] (desc is alphanumeric). */
+export function derivativePrefix(imageName: string, rater: string, session: string): string {
+  const r = rater.replace(/[^A-Za-z0-9]/g, "");
+  const ses = session && session !== "1" ? `ses${session.replace(/[^A-Za-z0-9]/g, "")}` : "";
+  return `${imageStem(imageName)}_desc-${r}${ses}`;
+}
+
+interface WorldPoint {
+  label: string;
+  ras: [number, number, number];
+}
+
+/** Placed clicks in subject world (RAS mm), labelled <landmark> or <landmark>_<click>. */
+export function worldPoints(proto: Protocol, s: Session, toWorld: (p0: V3) => [number, number, number]): WorldPoint[] {
+  const out: WorldPoint[] = [];
+  for (const l of proto.landmarks) {
+    const p = s.placements[l.id];
+    if (!p || p.status !== "placed") continue;
+    for (const c of p.clicks)
+      if (c.position0) out.push({ label: l.clicks.length > 1 ? `${l.id}_${c.label}` : l.id, ras: toWorld(c.position0) });
+  }
+  return out;
+}
+
+export function fcsvText(pts: WorldPoint[]): string {
+  let t = "# Markups fiducial file version = 4.10\n# CoordinateSystem = 0\n" +
+    "# columns = id,x,y,z,ow,ox,oy,oz,vis,sel,lock,label,desc,associatedNodeID\n";
+  pts.forEach((p, i) => {
+    t += `vtkMRMLMarkupsFiducialNode_${i + 1},${p.ras.map((v) => v.toFixed(5)).join(",")},0,0,0,1,1,1,1,${p.label.replace(/,/g, ";")},,\n`;
+  });
+  return t;
+}
+
+export function markupsJson(pts: WorldPoint[]): string {
+  return JSON.stringify({
+    "@schema": "https://raw.githubusercontent.com/slicer/slicer/master/Modules/Loadable/Markups/Resources/Schema/markups-schema-v1.0.3.json#",
+    markups: [{
+      type: "Fiducial", coordinateSystem: "RAS", coordinateUnits: "mm",
+      controlPoints: pts.map((p, i) => ({ id: String(i + 1), label: p.label, position: p.ras, positionStatus: "defined" })),
+    }],
+  }, null, 1);
+}
+
+/** JSON sidecar of the landmarks TSV. */
+export function sidecar(proto: Protocol, s: Session, voxel0: V3, orientation: string): string {
+  return JSON.stringify({
+    Description: "Manual anatomical landmarks placed with the mind-spim-qc landmark page.",
+    Sources: [s.image],
+    Protocol: proto.protocol,
+    ProtocolVersion: proto.version,
+    Template: proto.template,
+    Rater: s.rater,
+    Session: s.session,
+    Started: s.started,
+    CoordinateSpace: "level-0 voxel index (x0, y0, z0) of the image; x is the fastest array axis; integers are voxel centres. " +
+      "x_um, y_um, z_um are the index times the voxel size (array axes, no orientation).",
+    VoxelSize0_um_xyz: voxel0,
+    OrientationStringXYZ: orientation,
+    SlicerFiles: "The .fcsv and .mrk.json files hold the same points in RAS mm: world = orientation-signed index times voxel size, " +
+      "origin at level-0 voxel (0, 0, 0).",
+    Alignment: s.alignment ?? null,
+  }, null, 1);
 }

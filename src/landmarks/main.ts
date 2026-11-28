@@ -14,8 +14,10 @@ import {
   pixelToPhys, rasAxis, sampleInto, scale, sub, tiles, voxel0, windowOf,
   type Block, type Plane, type Roi, type Sampling, type V3,
 } from "./geometry";
+import { apply } from "../registration/affine";
+import { idx0ToWorld, runAlignment, tplVecToPhys, type Alignment } from "./alignment";
 import {
-  emptyPlacement, isDone, parseProtocol, sessionTsv, storageKey,
+  derivativePrefix, emptyPlacement, fcsvText, instantiate, isDone, markupsJson, parseProtocol, sessionTsv, sidecar, storageKey, worldPoints,
   type Landmark, type Placement, type Protocol, type Session, type Status,
 } from "./protocol";
 
@@ -62,6 +64,16 @@ function call<T>(body: Body): Promise<T> {
 // ---- state ----------------------------------------------------------------------
 
 let proto: Protocol | null = null;
+/** the template protocol as loaded, when the page places it by an alignment */
+let templateProto: Protocol | null = null;
+let alignment: Alignment | null = null;
+const TEMPLATES: Record<string, { anat: string; mask: string }> = {
+  ABAv3: {
+    anat: new URL("templates/ABAv3/tpl-ABAv3_res-100um_anat.nii.gz", location.href).href,
+    mask: new URL("templates/ABAv3/tpl-ABAv3_res-100um_desc-brain_mask.nii.gz", location.href).href,
+  },
+};
+const alignKey = (tpl: string, image: string) => `align:${tpl}:${image}`;
 let source: Source | null = null;
 let sourceName = "";
 let info: ImageInfo | null = null;
@@ -201,6 +213,34 @@ async function start() {
   }
   idle();
   const warnings: string[] = [];
+  if (proto.space === "template") {
+    templateProto = proto;
+    const channel = Number($<HTMLInputElement>("channel").value || 0);
+    const orientation = ($<HTMLInputElement>("orientation").value.trim() || info.orientation || "").toUpperCase();
+    if (!isValid(orientation)) {
+      status("Enter the image orientation (e.g. RAI): the file does not store one. The QC page helps to find it.", true);
+      return;
+    }
+    if (channel >= info.channels.length) {
+      status(`Channel ${channel} does not exist: the image has ${info.channels.length}.`, true);
+      return;
+    }
+    const tname = proto.template ?? "ABAv3";
+    const urls = TEMPLATES[tname];
+    if (!urls) {
+      status(`No template ${tname} on this site.`, true);
+      return;
+    }
+    const savedText = localStorage.getItem(alignKey(tname, sourceName));
+    const savedAl = savedText ? (JSON.parse(savedText) as Alignment) : null;
+    $("drop").hidden = true;
+    alignment = await runAlignment({
+      info, channel, imageName: sourceName, orientation, call,
+      template: { name: tname, ...urls }, saved: savedAl && savedAl.orientation === orientation ? savedAl : null,
+    });
+    localStorage.setItem(alignKey(tname, sourceName), JSON.stringify(alignment));
+    proto = placeTemplate(templateProto, alignment, channel);
+  }
   if (proto.image.channel >= info.channels.length) {
     status(`The protocol uses channel ${proto.image.channel}, the image has ${info.channels.length}.`, true);
     return;
@@ -215,8 +255,10 @@ async function start() {
   session = saved
     ? (JSON.parse(saved) as Session)
     : { protocol: proto.protocol, image: sourceName, rater, session: ses, started: new Date().toISOString(), placements: {} };
+  if (alignment) session.alignment = alignment;
   $("drop").hidden = true;
   $("app").hidden = false;
+  $("realign").hidden = !templateProto;
   $("file-name").textContent = sourceName;
   $("session-info").textContent =
     `Rater ${rater}, session ${ses}. Channel ${proto.image.channel}${proto.image.channel_name ? ` (${proto.image.channel_name})` : ""}, orientation ${proto.image.orientation}.` +
@@ -232,6 +274,29 @@ async function start() {
   openLandmark(firstTodo >= 0 ? firstTodo : 0);
   setInterval(tick, 1000);
 }
+
+function placeTemplate(tp: Protocol, al: Alignment, channel: number): Protocol {
+  return instantiate(tp, (mm) => apply(al.tpl2idx0, mm), (v) => tplVecToPhys(al, v), {
+    name: sourceName, orientation: al.orientation, channel,
+    channel_name: info!.channels[channel]?.name, voxel_size0_um_xyz: voxel0(info!),
+  });
+}
+
+$("realign").addEventListener("click", async () => {
+  if (!templateProto || !alignment || !info) return;
+  save();
+  $("app").hidden = true;
+  alignment = await runAlignment({
+    info, channel: proto!.image.channel, imageName: sourceName, orientation: alignment.orientation, call,
+    template: { name: alignment.template, ...TEMPLATES[alignment.template] }, saved: alignment,
+  });
+  localStorage.setItem(alignKey(alignment.template, sourceName), JSON.stringify(alignment));
+  proto = placeTemplate(templateProto, alignment, proto!.image.channel);
+  session!.alignment = alignment;
+  save();
+  $("app").hidden = false;
+  openLandmark(current);
+});
 
 // ---- persistence ------------------------------------------------------------------
 
@@ -256,15 +321,24 @@ function download(name: string, text: string, type: string) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-const stem = () => sourceName.replace(/\.(ims|ozx|zip|ome\.zarr|zarr)$/i, "");
+const prefix = () => derivativePrefix(sourceName, session!.rater, session!.session);
+const orientationNow = () => (isValid(proto!.image.orientation) ? proto!.image.orientation : "RAS");
 $("export-tsv").addEventListener("click", () => {
   if (!proto || !session || !info) return;
-  download(`${stem()}_rater-${session.rater}_ses-${session.session}_landmarks.tsv`, sessionTsv(proto, session, voxel0(info)), "text/tab-separated-values");
+  download(`${prefix()}_landmarks.tsv`, sessionTsv(proto, session, voxel0(info)), "text/tab-separated-values");
+  setTimeout(() => download(`${prefix()}_landmarks.json`, sidecar(proto!, session!, voxel0(info!), orientationNow()), "application/json"), 300);
+});
+$("export-slicer").addEventListener("click", () => {
+  if (!proto || !session || !info) return;
+  const M = idx0ToWorld(orientationNow(), voxel0(info));
+  const pts = worldPoints(proto, session, (p0) => apply(M, p0));
+  download(`${prefix()}_landmarks.fcsv`, fcsvText(pts), "text/plain");
+  setTimeout(() => download(`${prefix()}_landmarks.mrk.json`, markupsJson(pts), "application/json"), 300);
 });
 $("export-json").addEventListener("click", () => {
   if (!proto || !session || !info) return;
   const out = { ...session, protocol_image: proto.image, voxel_size0_um_xyz: voxel0(info), saved: new Date().toISOString() };
-  download(`${stem()}_rater-${session.rater}_ses-${session.session}_landmarks.json`, JSON.stringify(out, null, 1), "application/json");
+  download(`${prefix()}_session.json`, JSON.stringify(out, null, 1), "application/json");
 });
 $("import-json").addEventListener("change", async (e) => {
   const f = (e.target as HTMLInputElement).files?.[0];
@@ -346,14 +420,15 @@ function openLandmark(i: number) {
   $<HTMLInputElement>("slab").value = String(def.slab_um ?? (def.kind === "ortho" ? 0 : 8));
   $<HTMLInputElement>("smooth").value = String(def.smooth_um ?? 0);
   const depth = $<HTMLInputElement>("depth");
-  $("depth-label").hidden = def.kind !== "oblique";
+  $("depth-label").hidden = def.kind === "ortho";
+  $("depth-name").textContent = def.kind === "plane" ? "Plane offset" : "Depth";
   $("tilt-label").hidden = def.kind !== "oblique";
   $<HTMLInputElement>("tilt-u").value = String(vs.tiltU);
   $<HTMLInputElement>("tilt-v").value = String(vs.tiltV);
   $("tilt-value").textContent = `${vs.tiltU}°, ${vs.tiltV}°`;
   $("depth-value").textContent = `${vs.depth} µm`;
-  if (def.kind === "oblique") {
-    const [a, b] = def.depth_range_um ?? [-300, 300];
+  if (def.kind !== "ortho") {
+    const [a, b] = def.depth_range_um ?? (def.kind === "plane" ? [-400, 400] : [-300, 300]);
     depth.min = String(a);
     depth.max = String(b);
     depth.value = String(vs.depth);
@@ -491,8 +566,8 @@ function setClick(pos0: V3 | null) {
   p.status = "placed";
   p.updated = new Date().toISOString();
   p.fov_um = vs!.fov;
+  if (l.view.kind !== "ortho") p.depth_um = vs!.depth;
   if (l.view.kind === "oblique") {
-    p.depth_um = vs!.depth;
     p.tilt_deg = [vs!.tiltU, vs!.tiltV];
   }
   const next = l.clicks.findIndex((c) => !p.clicks.some((k) => k.label === c));
@@ -557,6 +632,8 @@ for (const id of ["tilt-u", "tilt-v"])
   });
 $("depth").addEventListener("input", () => {
   vs!.depth = Number($<HTMLInputElement>("depth").value);
+  const def = lm().view;
+  if (def.kind === "plane") vs!.cursor = projectOnPlane(vs!.cursor, add(l0ToPhys(info!, lm().position0), scale(def.normal!, vs!.depth)), def.normal!);
   $("depth-value").textContent = `${vs!.depth} µm`;
   void refresh();
 });
@@ -663,7 +740,7 @@ function buildViews() {
     const e = viewElement(title, big);
     add({ name: "main", canvas: e.canvas, px: big, plane: () => {
       const { u, v, n } = axes();
-      const c = def.kind === "oblique" ? add3(projectOnPlane(vs!.center, l0ToPhys(info!, l.position0), n), scale(n, vs!.depth)) : vs!.center;
+      const c = add3(projectOnPlane(vs!.center, l0ToPhys(info!, l.position0), n), scale(n, vs!.depth));
       return { center: c, u, v, n };
     } }, e.edges, e.root);
     if (def.kind === "oblique") {

@@ -28,6 +28,10 @@
         <dt>Image</dt><dd id="image-name">–</dd>
       </dl>
       <div class="rater-row">
+        <label title="for template protocols: the channel to show and align">Channel <input id="channel" type="number" min="0" value="0" class="narrow" /></label>
+        <label title="OrientationStringXYZ; leave empty to use the one stored in the file">Orientation <input id="orientation" maxlength="3" placeholder="from file" class="narrow" /></label>
+      </div>
+      <div class="rater-row">
         <label>Rater <input id="rater" placeholder="initials" maxlength="20" /></label>
         <label>Session <input id="session" value="1" maxlength="10" class="narrow" /></label>
         <button id="start" disabled>Start</button>
@@ -42,6 +46,26 @@
       </div>
     </div>
 
+    <section id="align" class="align" hidden>
+      <h2>Align the template</h2>
+      <p class="hint">The template is aligned to the image only to start each landmark view near its place: a few hundred µm off is fine.
+        Magenta: template edges; yellow: template brain outline. Click a view to move the slices.</p>
+      <p id="align-status" class="status"></p>
+      <div class="align-layout">
+        <div id="align-views" class="lm-views"></div>
+        <div class="align-side">
+          <div id="align-controls"></div>
+          <p id="align-info" class="hint"></p>
+          <div class="align-buttons">
+            <button id="align-auto" class="secondary">Automatic</button>
+            <button id="align-refine" class="secondary" title="run the automatic search again, starting from the current alignment">Refine from here</button>
+            <button id="align-save" class="secondary">Save alignment</button>
+            <button id="align-accept">Accept</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <main id="app" hidden>
       <aside>
         <h2 id="file-name"></h2>
@@ -49,8 +73,10 @@
         <p id="progress"></p>
         <label>Show <select id="group-filter"></select></label>
         <ol id="list" class="lm-list"></ol>
-        <button id="export-tsv">Save placements (TSV)</button>
-        <button id="export-json" class="secondary">Save session (JSON)</button>
+        <button id="export-tsv" title="landmarks .tsv and its .json sidecar, for a derivatives dataset">Save placements (TSV)</button>
+        <button id="export-slicer" class="secondary" title=".fcsv and .mrk.json in RAS mm">Save for 3D Slicer</button>
+        <button id="export-json" class="secondary" title="everything, to resume elsewhere">Save session (JSON)</button>
+        <button id="realign" class="secondary" title="for template protocols">Re-align template</button>
         <label class="button secondary">Load session (JSON)<input id="import-json" type="file" accept=".json" hidden /></label>
         <p class="hint">Placements are also kept in this browser and come back when you open the same protocol, image, rater and session.</p>
       </aside>
@@ -77,7 +103,7 @@
           <label>Slab <input id="slab" type="number" min="0" max="200" step="2" class="narrow" /> µm</label>
           <label>Smooth <input id="smooth" type="number" min="0" max="50" step="1" class="narrow" /> µm</label>
           <label>Contrast <input id="contrast" type="range" min="90" max="100" step="0.1" value="99.7" /></label>
-          <label id="depth-label">Depth <input id="depth" type="range" step="2" /> <span id="depth-value"></span></label>
+          <label id="depth-label"><span id="depth-name">Depth</span> <input id="depth" type="range" step="2" /> <span id="depth-value"></span></label>
           <label id="tilt-label">Tilt <input id="tilt-u" type="range" min="-30" max="30" step="1" value="0" title="about the vertical axis" />
             <input id="tilt-v" type="range" min="-30" max="30" step="1" value="0" title="about the horizontal axis" /> <span id="tilt-value"></span></label>
           <label class="check"><input id="show-init" type="checkbox" /> show start position</label>

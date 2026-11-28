@@ -20,6 +20,22 @@ import { analyseChannel, chooseSites, readZoom, type ChannelAnalysis, type Chann
 import { logCorrelation } from "./analysis/metrics";
 import { measurePsf, measureSides, psfCost, psfPoints, sidePoints, type PsfResult, type SidesResult } from "./analysis/run";
 import type { Shape } from "./analysis/mask";
+import { registerAffine, type Grid, type M4, type RegResult } from "./registration/affine";
+import { loadNifti } from "./registration/nifti";
+
+export type { RegResult };
+
+/** templates loaded for registration, by URL */
+const templates = new Map<string, Grid>();
+async function templateGrid(url: string): Promise<Grid> {
+  let g = templates.get(url);
+  if (!g) {
+    const n = await loadNifti(url);
+    g = { dims: n.dims, data: n.data, vox2world: n.affine };
+    templates.set(url, g);
+  }
+  return g;
+}
 
 export type Source = { kind: "file"; file: File } | { kind: "folder"; name: string };
 
@@ -32,6 +48,7 @@ export type Request =
   | { id: number; type: "psf-plan"; channel: number; points: number; sides: 1 | 2 | null }
   | { id: number; type: "psf"; channel: number; points: number; sides: 1 | 2 | null }
   | { id: number; type: "box"; box: Box; channel: number }
+  | { id: number; type: "register"; grid: Grid; template: { anat: string; mask: string }; init?: M4 }
   | { id: number; type: "cancel" };
 
 export interface PsfPlan {
@@ -184,6 +201,12 @@ self.onmessage = async (e: MessageEvent<Request | FetchReply>) => {
       if (!reader) throw new Error("No image open");
       const vol = await reader.readBox(msg.box, msg.channel);
       reply(vol, [vol.data.buffer as ArrayBuffer]);
+    } else if (msg.type === "register") {
+      const tpl = await templateGrid(msg.template.anat);
+      const mask = await templateGrid(msg.template.mask);
+      const log: string[] = [];
+      const res = registerAffine(tpl, mask, msg.grid, { init: msg.init, log: (m) => log.push(m) });
+      reply({ ...res, log });
     } else if (msg.type === "sites") {
       reply(chooseSites(analyses[msg.channel], need(), msg.bright, msg.dim));
     } else if (msg.type === "zoom") {

@@ -426,6 +426,8 @@ export interface RegResult {
 
 export interface RegOptions {
   log?: (msg: string) => void;
+  /** refine from this transform (template -> subject world): skips the start and the mask stage */
+  init?: M4;
 }
 
 /**
@@ -445,23 +447,29 @@ export function registerAffine(tpl: Grid, tplMask: Grid, sub: Grid, opt: RegOpti
   const tplMaskSm = blur(maskOf(tplMask200, 0.5), 0.3);
   const mt = moments(maskOf(tplMask200, 0.5));
   const ms = moments(subMask);
-  const center = mt.c;
-  // initial parameters: centroid offset and per-axis scale from the spreads
-  let p: Params = [ms.c[0] - mt.c[0], ms.c[1] - mt.c[1], ms.c[2] - mt.c[2], 0, 0, 0,
+  // The search is over D(p), composed with a fixed T0: T = D(p) T0. Without an
+  // initial transform, T0 = identity and p starts from the moments; with one,
+  // p starts at 0 and D turns about where T0 puts the template centre.
+  const T0: M4 = opt.init ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const center = opt.init ? apply(T0, mt.c) : mt.c;
+  const full = (q: Params) => mul(matrixOf(q, center), T0);
+  let p: Params = opt.init ? new Array(12).fill(0) : [ms.c[0] - mt.c[0], ms.c[1] - mt.c[1], ms.c[2] - mt.c[2], 0, 0, 0,
     Math.log(ms.sd[0] / mt.sd[0]), Math.log(ms.sd[1] / mt.sd[1]), Math.log(ms.sd[2] / mt.sd[2]), 0, 0, 0];
-  log(`init: translation ${p.slice(0, 3).map((v) => v.toFixed(2)).join(", ")} mm, scale ${p.slice(6, 9).map((v) => Math.exp(v).toFixed(2)).join(", ")}`);
-
-  // stage 1: masks
-  const w2v400 = inv(subMaskSm.vox2world);
-  const sMask = samplePoints(tplMaskSm, null, 12000, 7);
   const steps = [0.4, 0.4, 0.4, 0.06, 0.06, 0.06, 0.05, 0.05, 0.05, 0.03, 0.03, 0.03];
   const minS = [0.01, 0.01, 0.01, 0.002, 0.002, 0.002, 0.002, 0.002, 0.002, 0.002, 0.002, 0.002];
   let ta = performance.now();
-  let r = patternSearch((q) => ssd(subMaskSm, w2v400, matrixOf(q, center), sMask), p, steps, minS,
-    [true, true, true, true, true, true, true, true, true, false, false, false]);
-  p = r.p;
-  stages.push({ name: "masks", cost: r.f, evals: r.evals, ms: performance.now() - ta });
-  log(`masks: cost ${r.f.toFixed(4)} after ${r.evals} evaluations`);
+  let r: { p: Params; f: number; evals: number };
+  if (!opt.init) {
+    log(`init: translation ${p.slice(0, 3).map((v) => v.toFixed(2)).join(", ")} mm, scale ${p.slice(6, 9).map((v) => Math.exp(v).toFixed(2)).join(", ")}`);
+    // stage 1: masks
+    const w2v400 = inv(subMaskSm.vox2world);
+    const sMask = samplePoints(tplMaskSm, null, 12000, 7);
+    r = patternSearch((q) => ssd(subMaskSm, w2v400, full(q), sMask), p, steps, minS,
+      [true, true, true, true, true, true, true, true, true, false, false, false]);
+    p = r.p;
+    stages.push({ name: "masks", cost: r.f, evals: r.evals, ms: performance.now() - ta });
+    log(`masks: cost ${r.f.toFixed(4)} after ${r.evals} evaluations`);
+  }
 
   // stages 2-3: mutual information
   for (const [name, res, n, scaleSteps] of [["MI 200 um", 0.2, 15000, 0.5], ["MI 100 um", 0.1, 25000, 0.25]] as const) {
@@ -475,13 +483,13 @@ export function registerAffine(tpl: Grid, tplMask: Grid, sub: Grid, opt: RegOpti
     const sr = range(s.data);
     const tr = range(smp.val);
     const w2v = inv(s.vox2world);
-    r = patternSearch((q) => negMI(s, w2v, matrixOf(q, center), smp, sr, tr), p,
-      steps.map((v) => v * scaleSteps), minS, new Array(12).fill(true));
+    r = patternSearch((q) => negMI(s, w2v, full(q), smp, sr, tr), p,
+      steps.map((v) => v * scaleSteps * (opt.init ? 0.5 : 1)), minS, new Array(12).fill(true));
     p = r.p;
     stages.push({ name, cost: r.f, evals: r.evals, ms: performance.now() - ta });
     log(`${name}: MI ${(-r.f).toFixed(4)} after ${r.evals} evaluations`);
   }
-  const T = matrixOf(p, center);
+  const T = full(p);
   // overlap of the template brain with the subject mask
   const sm2 = samplePoints(tplMask200, tplMask200, 5000, 3);
   const M = mul(inv(subMask.vox2world), T);
